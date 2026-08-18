@@ -13,7 +13,9 @@ pkgs <- c(
   "lubridate",     # date/time handling
   "shiny",         # dashboard
   "leaflet",       # interactive maps
-  "leaflet.extras" # heatmap layer for leaflet
+  "leaflet.extras",# heatmap layer for leaflet
+  "DBI",           # database connection (used by the live/Kafka layer)
+  "RPostgres"      # Postgres driver (used by the live/Kafka layer)
 )
 
 installed <- rownames(installed.packages())
