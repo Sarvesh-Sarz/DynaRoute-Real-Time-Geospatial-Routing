@@ -34,8 +34,16 @@ dynaroute/
 │   ├── 02_simulate_orders.R    # fakes outlets + a stream of orders for demo purposes
 │   ├── 03_demand_model.R       # predicts per-outlet queue length by hour/day (tidymodels)
 │   ├── 04_dynamic_scoring.R    # the scoring function + best-outlet assignment logic
-│   └── 05_demand_clusters.R    # DBSCAN hotspot detection over order locations
-└── app.R                       # Shiny + leaflet dashboard tying it all together
+│   ├── 05_demand_clusters.R    # DBSCAN hotspot detection over order locations
+│   └── 06_read_live_orders.R   # reads live queue data from Postgres (streaming layer)
+├── app.R                       # core Shiny + leaflet dashboard (static/simulated data)
+├── app_live.R                  # LIVE dashboard — scored from the real Kafka stream
+└── streaming/                  # optional bonus layer — real Kafka, not required for core
+    ├── docker-compose.yml      # spins up Redpanda (Kafka-compatible) + Postgres
+    ├── init.sql                # Postgres schema
+    ├── producer.py             # simulates live orders, publishes to Kafka topic
+    ├── consumer.py             # reads from Kafka, writes into Postgres
+    └── requirements.txt        # Python deps for producer.py / consumer.py
 ```
 
 ## Tech stack
@@ -77,6 +85,37 @@ By default the scripts pull the road network around **Vellore, Tamil Nadu** — 
 `place_name` variable at the top of `01_build_network.R` to point at any other city OpenStreetMap
 recognizes.
 
+## Running the live Kafka layer (optional)
+
+The core project (`app.R`) works fully with simulated/static data and doesn't need any of this.
+The streaming layer below is a real, working producer → Kafka/Redpanda → consumer → Postgres →
+Shiny pipeline, kept in `streaming/` so it's clearly separable from the graded core.
+
+```bash
+# 1. Start the broker + database
+cd streaming
+docker compose up -d
+
+# 2. Install Python deps
+pip install -r requirements.txt
+
+# 3. In one terminal — start the producer (simulates live orders)
+python producer.py
+
+# 4. In another terminal — start the consumer (Kafka -> Postgres)
+python consumer.py
+
+# 5. Back in R, from the project root — run the live dashboard
+Rscript -e "shiny::runApp('app_live.R')"
+```
+
+`producer.py` uses a **compressed clock** — 1 real minute = 1 simulated hour — so you'll see the
+hostel curfew kick in within a few minutes of starting it, instead of waiting a real 24 hours.
+`app_live.R` polls Postgres every 3 seconds (`reactivePoll()`) and scores outlets using the
+*actual* streamed queue lengths instead of the static tidymodels prediction used in `app.R`.
+
+To stop everything: `Ctrl+C` the producer/consumer, then `docker compose down` in `streaming/`.
+
 ## How the pieces fit together
 
 1. **Build the network** — outlets and delivery areas become graph nodes; roads become edges,
@@ -96,5 +135,9 @@ recognizes.
   behind this out of the box. Swap `R/02_simulate_orders.R` for a real dataset if you have one.
 - `03_demand_model.R` uses a simple model on purpose (easy to explain in a viva); swapping in a
   fancier `tidymodels` spec is a drop-in change.
+- The `streaming/` layer is real — actual Redpanda (Kafka-compatible) broker, actual producer and
+  consumer, actual Postgres — not a mock. It's kept optional/separable because the core R
+  pipeline (`app.R`) is what's meant to be graded on the analytics; `app_live.R` is there to prove
+  the streaming architecture out for anyone who wants to see it end-to-end.
 - This is a course project, not a production system — see the write-up for an honest discussion
   of what would be needed to make it deployment-ready.
