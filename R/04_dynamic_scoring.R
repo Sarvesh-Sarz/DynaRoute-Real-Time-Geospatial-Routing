@@ -21,6 +21,7 @@ outlets        <- readRDS("outlets.rds")
 hostel_node    <- readRDS("hostel_node.rds")
 demand_model   <- readRDS("demand_model.rds")
 source("R/03_demand_model.R")  # for predict_queue_length(), harmless to re-source
+source("R/00_predict_helpers.R")
 
 BLOCKED_SCORE <- 1e6  # effectively "infinite" — never selected while active
 
