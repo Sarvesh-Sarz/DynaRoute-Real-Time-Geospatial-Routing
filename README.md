@@ -28,9 +28,13 @@ expected_time = travel_time + (queue_length × avg_prep_time)
 ```
 dynaroute/
 ├── README.md
+├── TESTING.md                  # step-by-step checklist to verify each stage
+├── run_pipeline.R               # runs the whole non-streaming pipeline in order
 ├── requirements.R              # installs every package used below
 ├── R/
+│   ├── 00_predict_helpers.R    # shared prediction helper (used by 03 and 04)
 │   ├── 01_build_network.R      # pulls OSM road data, builds the graph (sfnetworks)
+│   ├── dev_synthetic_network.R # fast offline stand-in network for development/testing
 │   ├── 02_simulate_orders.R    # fakes outlets + a stream of orders for demo purposes
 │   ├── 03_demand_model.R       # predicts per-outlet queue length by hour/day (tidymodels)
 │   ├── 04_dynamic_scoring.R    # the scoring function + best-outlet assignment logic
@@ -80,6 +84,10 @@ source("R/03_demand_model.R")
 # 5. Run the dashboard
 shiny::runApp("app.R")
 ```
+
+Or run steps 2-5 in one go with `Rscript run_pipeline.R` (real OSM data) or
+`Rscript run_pipeline.R --fast` (instant synthetic network, useful while developing).
+See `TESTING.md` for the expected output at each stage and how to isolate a bug if one shows up.
 
 By default the scripts pull the road network around **Vellore, Tamil Nadu** — change the
 `place_name` variable at the top of `01_build_network.R` to point at any other city OpenStreetMap
