@@ -101,15 +101,22 @@ server <- function(input, output, session) {
     res$all_scores
   })
 
-  observe({
+  shiny::observeEvent(input$show_heatmap, {
     if (isTRUE(input$show_heatmap) && !is.null(order_coords)) {
       leafletProxy("map") %>%
         clearHeatmap() %>%
-        addHeatmap(data = order_coords, lng = ~lon, lat = ~lat, radius = 18, blur = 25)
+        addHeatmap(
+          data = order_coords,
+          lng = ~lon,
+          lat = ~lat,
+          radius = 18,
+          blur = 25
+        )
     } else {
-      leafletProxy("map") %>% clearHeatmap()
+      leafletProxy("map") %>%
+        clearHeatmap()
     }
-  })
+  }, ignoreInit = FALSE)
 }
 
 shinyApp(ui, server)
