@@ -73,20 +73,14 @@ server <- function(input, output, session) {
     pt <- st_sfc(st_point(c(click$lng, click$lat)), crs = 4326) %>%
       st_transform(st_crs(city_network))
     customer_point(pt)
-  })
 
-  observe({
-    req(customer_point())
     leafletProxy("map") %>%
       clearGroup("customer") %>%
       addCircleMarkers(
-        lng = click_lng(), lat = click_lat(),
+        lng = click$lng, lat = click$lat,
         group = "customer", color = "black", radius = 6
       )
   })
-
-  click_lng <- reactive({ req(customer_point()); st_coordinates(st_transform(customer_point(), 4326))[1] })
-  click_lat <- reactive({ req(customer_point()); st_coordinates(st_transform(customer_point(), 4326))[2] })
 
   assignment <- reactive({
     req(customer_point())
