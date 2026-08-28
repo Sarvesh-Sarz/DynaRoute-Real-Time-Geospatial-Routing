@@ -107,7 +107,8 @@ server <- function(input, output, session) {
   output$score_table <- renderTable({
     res <- assignment()
     req(res)
-    res$all_scores
+  
+    as.data.frame(res$all_scores)
   })
 
   observe({
