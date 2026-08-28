@@ -76,13 +76,25 @@ score_outlet <- function(network, outlet_row, customer_point, hour, demand_model
 
 # ---- Assign the best outlet for a new order ---------------------------------
 assign_best_outlet <- function(customer_point, hour,
-                                network = city_network,
-                                outlets_df = outlets,
-                                model = demand_model) {
+                               network = city_network,
+                               outlets_df = outlets,
+                               model = demand_model) {
+
+  if (!is_location_served(customer_point, network)) {
+    message("Customer location is outside the service area.")
+    return(NULL)
+  }
+
   scored <- outlets_df %>%
     rowwise() %>%
     mutate(
-      expected_time_min = score_outlet(network, cur_data(), customer_point, hour, model)
+      expected_time_min = score_outlet(
+        network,
+        cur_data(),
+        customer_point,
+        hour,
+        model
+      )
     ) %>%
     ungroup() %>%
     arrange(expected_time_min)
@@ -90,14 +102,15 @@ assign_best_outlet <- function(customer_point, hour,
   best <- scored %>% slice(1)
 
   if (best$expected_time_min >= BLOCKED_SCORE) {
-    message("No outlet can currently serve this location (time-based constraint active).")
+    message("No outlet can currently serve this location.")
     return(NULL)
   }
 
   list(
     chosen_outlet = best$outlet_id,
     expected_time_min = round(best$expected_time_min, 1),
-    all_scores = scored %>% select(outlet_id, expected_time_min)
+    all_scores = scored %>%
+      select(outlet_id, expected_time_min)
   )
 }
 
