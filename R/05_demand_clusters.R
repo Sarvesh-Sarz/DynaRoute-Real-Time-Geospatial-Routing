@@ -30,11 +30,14 @@ order_coords <- orders %>%
   select(outlet_id, hour, lon, lat)
 
 # ---- Run DBSCAN ------------------------------------------------------------
-# eps: neighborhood radius in degrees (~0.002 ≈ 200m at this latitude)
-# minPts: minimum orders to form a dense cluster
+# eps: neighborhood radius in degrees. Order points are jittered with a
+# stddev of ~0.003 around their outlet (see above), so eps needs to be
+# comfortably larger than that or almost every point ends up classified as
+# noise instead of forming a cluster. ~0.006 ≈ 650m at this latitude.
+# minPts: minimum orders to form a dense cluster.
 coords_matrix <- order_coords %>% select(lon, lat) %>% as.matrix()
 
-clustering <- dbscan(coords_matrix, eps = 0.002, minPts = 5)
+clustering <- dbscan(coords_matrix, eps = 0.006, minPts = 4)
 
 order_coords$cluster_id <- clustering$cluster  # 0 = noise / not in a hotspot
 
