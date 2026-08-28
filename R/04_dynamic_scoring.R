@@ -25,6 +25,21 @@ source("R/00_predict_helpers.R")
 
 BLOCKED_SCORE <- 1e6  # effectively "infinite" — never selected while active
 
+is_location_served <- function(customer_point, network, max_distance_m = 3000) {
+  nodes <- network %>%
+    activate("nodes") %>%
+    st_as_sf()
+
+  nearest <- st_nearest_feature(customer_point, nodes)
+
+  distance <- st_distance(
+    customer_point,
+    nodes[nearest, ]
+  )
+
+  as.numeric(distance) <= max_distance_m
+}
+
 # ---- Travel time between customer and a given outlet -----------------------
 get_travel_time_min <- function(network, from_point, to_point) {
   # snap both points to the nearest network nodes, then shortest-path travel time
