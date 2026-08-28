@@ -90,9 +90,18 @@ server <- function(input, output, session) {
 
   output$assignment_text <- renderText({
     res <- assignment()
-    if (is.null(customer_point())) return("No customer location selected yet.")
-    if (is.null(res)) return("This location can't be served right now (time-based constraint active).")
-    paste0("Best outlet: ", res$chosen_outlet, " — expected ", res$expected_time_min, " min")
+  
+    if (is.null(res)) {
+      return("This location is outside the DynaRoute service area.")
+    }
+  
+    paste0(
+      "Best outlet: ",
+      res$chosen_outlet,
+      " — expected ",
+      res$expected_time_min,
+      " min"
+    )
   })
 
   output$score_table <- renderTable({
