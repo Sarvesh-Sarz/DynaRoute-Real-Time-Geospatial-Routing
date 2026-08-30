@@ -16,8 +16,8 @@ pkgs <- c(
   "leaflet.extras",# heatmap layer for leaflet
   "DBI",           # database connection (used by the live/Kafka layer)
   "RPostgres"      # Postgres driver (used by the live/Kafka layer)
-  "httr",
-  "jsonlite",
+  "httr",          # weather API calls
+  "jsonlite",      # parsing the weather API response
 )
 
 installed <- rownames(installed.packages())
