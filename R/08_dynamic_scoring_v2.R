@@ -1,20 +1,13 @@
 # R/08_dynamic_scoring_v2.R
 #
-# The "dynamic graph" engine. Builds on the same city_network.rds used
-# everywhere else in the project, but instead of a fixed travel_time_min per
-# edge, it recomputes each edge's CURRENT travel time from:
+# The "dynamic graph" engine. Recomputes every edge's CURRENT travel time
+# from traffic and weather factors, blocks edges near the hostel after
+# curfew, scores every outlet on the CURRENT graph in a plain loop (kept
+# deliberately simple/readable over a rowwise-list-column approach), and
+# returns a full per-outlet breakdown plus the winning route's geometry.
 #
-#   current_travel_time_min = base_travel_time_min * traffic_factor * weather_factor
-#
-# and marks edges near the hostel as effectively blocked once its curfew
-# hour is reached. The routing/assignment logic then uses these CURRENT
-# weights, so the exact same physical road network can produce different
-# travel times -- and therefore a different best outlet -- depending on the
-# hour, current traffic, and current weather.
-#
-# This file does NOT modify or replace R/04_dynamic_scoring.R. It is a
-# parallel, self-contained engine used only by app_v2.R, so app.R and
-# app_live.R keep working exactly as before.
+# Does not modify R/04_dynamic_scoring.R -- this is a separate engine used
+# only by app_v2.R.
 
 library(sf)
 library(sfnetworks)
@@ -26,12 +19,10 @@ source("R/06_conditions.R")
 source("R/07_geofence.R")
 
 BLOCKED_EDGE_WEIGHT   <- 1e6   # effectively "infinite" for a single edge
-BLOCKED_OUTLET_SCORE  <- 1e7   # effectively "infinite" for a whole outlet
 HOSTEL_BLOCK_RADIUS_M <- 350   # edges within this distance of the hostel are
                                 # treated as curfew-affected once curfew hits
 
-# ---- Step 1: recompute every edge's current travel time --------------------
-# Returns a NEW network object -- never mutates city_network.rds on disk.
+# ---- Recompute every edge's current travel time -----------------------
 update_dynamic_network <- function(network, hour, traffic_factor, weather_factor,
                                     hostel_point = NULL, curfew_hour = NULL) {
   edges_sf <- network %>% activate("edges") %>% st_as_sf()
@@ -60,55 +51,56 @@ update_dynamic_network <- function(network, hour, traffic_factor, weather_factor
     )
 }
 
-# ---- Step 2: travel time and route path on the CURRENT network -------------
-get_current_travel_time_min <- function(network, from_point, to_point) {
+# ---- Travel time + route path on the CURRENT network, computed once ---------
+# Distinguishes "same node" (0 min, route_found = TRUE) from "genuinely no
+# path found" (route_found = FALSE) instead of collapsing both to 0 -- an
+# unreachable outlet must never look identical to a zero-distance one.
+get_route_info <- function(network, from_point, to_point) {
   path <- sfnetworks::st_network_paths(
     network, from = from_point, to = to_point, weights = "current_travel_time_min"
   )
   edge_ids <- path$edge_paths[[1]]
-  if (length(edge_ids) == 0) return(0)  # same node / negligible distance
+
+  if (length(edge_ids) == 0) {
+    same_point <- as.numeric(st_distance(from_point, to_point)) < 5
+    if (same_point) {
+      return(list(travel_time = 0, edge_count = 0, route_found = TRUE, route_line = NULL))
+    }
+    return(list(travel_time = Inf, edge_count = 0, route_found = FALSE, route_line = NULL))
+  }
 
   edges_sf <- network %>% activate("edges") %>% st_as_sf()
-  sum(edges_sf$current_travel_time_min[edge_ids])
+  travel_time <- sum(edges_sf$current_travel_time_min[edge_ids])
+  route_line <- edges_sf$geometry[edge_ids] %>% st_union() %>% st_line_merge()
+
+  list(travel_time = travel_time, edge_count = length(edge_ids), route_found = TRUE, route_line = route_line)
 }
 
-get_route_line <- function(network, from_point, to_point) {
-  path <- sfnetworks::st_network_paths(
-    network, from = from_point, to = to_point, weights = "current_travel_time_min"
-  )
-  edge_ids <- path$edge_paths[[1]]
-  if (length(edge_ids) == 0) return(NULL)
-
-  edges_sf <- network %>% activate("edges") %>% st_as_sf()
-  edges_sf$geometry[edge_ids] %>% st_union() %>% st_line_merge()
-}
-
-# ---- Step 3: assign the best outlet using current conditions ---------------
-# customer_point_4326: the raw click, in lon/lat (EPSG:4326)
-# service_area: polygon from build_service_area(), same CRS as customer_point_4326
-# live_queue_lookup: optional function(outlet_id) -> extra queue count from
-#                     the Kafka stream (see R/09_live_queue.R). NULL if the
-#                     streaming layer isn't running -- the app must still work.
+# ---- Assign the best outlet using current conditions ---------------------
+# customer_point_4326: the raw click, lon/lat (EPSG:4326)
+# service_area: convex-hull polygon from build_service_area(), secondary check
+# live_queue_lookup: optional function(outlet_id) -> extra queue count.
+#                     NULL if the streaming layer isn't running.
 assign_best_outlet_dynamic <- function(customer_point_4326, hour,
                                         network, outlets_df, model,
                                         hostel_pt, curfew_hour,
                                         service_area = NULL,
                                         live_queue_lookup = NULL) {
 
-  # --- geofence check ---------------------------------------------------
-  if (!is.null(service_area) && !is_within_service_area(customer_point_4326, service_area)) {
+  if (!is.null(service_area) &&
+      !is_within_service_area(customer_point_4326, network, service_area)) {
     return(list(status = "outside_service_area"))
   }
 
   customer_point <- st_transform(customer_point_4326, st_crs(network))
 
-  # --- hostel curfew check (customer's own location) --------------------
+  # Curfew only blocks customers actually near the hostel -- unrelated
+  # locations are never rejected because of it.
   dist_to_hostel <- as.numeric(st_distance(customer_point, hostel_pt))
   if (dist_to_hostel < HOSTEL_BLOCK_RADIUS_M && hour >= curfew_hour) {
     return(list(status = "hostel_curfew"))
   }
 
-  # --- current conditions -------------------------------------------------
   traffic <- get_traffic_state(hour)
   weather <- get_weather_state()
   dyn_network <- update_dynamic_network(
@@ -116,45 +108,70 @@ assign_best_outlet_dynamic <- function(customer_point_4326, hour,
     hostel_point = hostel_pt, curfew_hour = curfew_hour
   )
 
-  # --- score every outlet on the CURRENT graph -----------------------------
-  scored <- outlets_df %>%
-    rowwise() %>%
-    mutate(
-      travel_time_min = get_current_travel_time_min(dyn_network, geometry, customer_point),
-      predicted_queue = predict_queue_length(model, outlet_id, hour) +
-        (if (!is.null(live_queue_lookup)) live_queue_lookup(outlet_id) else 0),
-      expected_time_min = if (travel_time_min >= BLOCKED_EDGE_WEIGHT) {
-        BLOCKED_OUTLET_SCORE
-      } else {
-        travel_time_min + (predicted_queue * avg_prep_time_min)
-      }
-    ) %>%
-    ungroup() %>%
-    arrange(expected_time_min)
+  rows <- vector("list", nrow(outlets_df))
+  route_infos <- list()
 
-  best <- scored %>% slice(1)
+  for (i in seq_len(nrow(outlets_df))) {
+    outlet_id  <- outlets_df$outlet_id[i]
+    outlet_geom <- outlets_df$geometry[i]
+    avg_prep   <- outlets_df$avg_prep_time_min[i]
 
-  if (best$expected_time_min >= BLOCKED_OUTLET_SCORE) {
-    return(list(status = "no_outlet_reachable"))
+    route_info <- get_route_info(dyn_network, outlet_geom, customer_point)
+    route_infos[[outlet_id]] <- route_info
+
+    predicted_queue <- predict_queue_length(model, outlet_id, hour)
+    live_boost <- if (!is.null(live_queue_lookup)) live_queue_lookup(outlet_id) else 0
+
+    expected_time <- if (!route_info$route_found || route_info$travel_time >= BLOCKED_EDGE_WEIGHT) {
+      Inf
+    } else {
+      route_info$travel_time + ((predicted_queue + live_boost) * avg_prep)
+    }
+
+    rows[[i]] <- data.frame(
+      outlet_id = outlet_id,
+      travel_time_min = route_info$travel_time,
+      predicted_queue = predicted_queue,
+      live_queue_boost = live_boost,
+      traffic_factor = traffic$factor,
+      weather_factor = weather$factor,
+      expected_time_min = expected_time,
+      route_found = route_info$route_found,
+      stringsAsFactors = FALSE
+    )
   }
 
-  best_outlet_geom <- outlets_df$geometry[outlets_df$outlet_id == best$outlet_id]
-  route_line <- get_route_line(dyn_network, best_outlet_geom, customer_point)
+  scored <- bind_rows(rows) %>% arrange(expected_time_min)
+  best <- scored %>% slice(1)
+
+  if (!is.finite(best$expected_time_min)) {
+    return(list(status = "no_outlet_reachable", traffic = traffic, weather = weather))
+  }
+
+  best_route <- route_infos[[best$outlet_id]]
+  best_avg_prep <- outlets_df$avg_prep_time_min[outlets_df$outlet_id == best$outlet_id]
 
   list(
     status = "ok",
     chosen_outlet = best$outlet_id,
     expected_time_min = round(best$expected_time_min, 1),
+    travel_time_min = round(best$travel_time_min, 1),
+    predicted_queue = round(best$predicted_queue, 1),
+    live_queue_boost = round(best$live_queue_boost, 1),
+    prep_contribution_min = round((best$predicted_queue + best$live_queue_boost) * best_avg_prep, 1),
     traffic = traffic,
     weather = weather,
-    route_line_projected = route_line,  # in network's CRS -- transform before drawing
+    route_line_projected = best_route$route_line,
+    route_edge_count = best_route$edge_count,
     all_scores = scored %>%
-      transmute(
-        outlet_id,
+      mutate(
         travel_time_min = round(travel_time_min, 1),
         predicted_queue = round(predicted_queue, 1),
-        expected_time_min = round(expected_time_min, 1),
-        status = if_else(expected_time_min >= BLOCKED_OUTLET_SCORE, "Blocked", "Available")
-      )
+        live_queue_boost = round(live_queue_boost, 1),
+        expected_time_min = ifelse(is.finite(expected_time_min), round(expected_time_min, 1), NA),
+        status = ifelse(route_found & is.finite(expected_time_min), "Available", "Blocked")
+      ) %>%
+      select(outlet_id, travel_time_min, predicted_queue, live_queue_boost,
+             traffic_factor, weather_factor, expected_time_min, status)
   )
 }
