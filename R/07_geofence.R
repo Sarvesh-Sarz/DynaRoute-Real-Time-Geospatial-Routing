@@ -1,33 +1,66 @@
 # R/07_geofence.R
 #
-# Defines the delivery service area as the convex hull of every node in the
-# road network (with a small buffer), and checks whether a customer point
-# actually falls inside it. This stops the app from calculating a delivery
-# time for a location that isn't even part of the network -- e.g. clicking
-# somewhere outside the city entirely.
+# Defines whether a clicked customer point is serviceable.
 #
-# Note on units: this project's road network uses an unprojected (lon/lat)
-# CRS. Modern sf (>= 1.0) uses the S2 spherical geometry engine by default
-# for that kind of coordinate data, which means st_distance()/st_buffer()
-# already work in METERS, not degrees -- the same assumption R/04's curfew
-# check already relies on. buffer_m below is a real meters value, not a
-# degree offset.
+# The PRIMARY check is distance to the nearest actual network node -- this
+# directly answers "can we route from here?" and doesn't depend on the
+# shape of any polygon. This matters because real OSM road extracts are
+# often not fully connected; after to_largest_component() keeps only the
+# single largest connected chunk, the network's true coverage can be
+# noticeably smaller (or a different shape) than the whole visible map --
+# so a point that looks perfectly central on the map can genuinely be far
+# from any node that survived that pruning step.
+#
+# The convex-hull polygon is kept as a SECONDARY, more permissive check
+# (mostly useful for a compact/synthetic network), and as something you can
+# render on the map to see the network's actual coverage.
 
 library(sf)
 library(sfnetworks)
 library(dplyr)
 
-# Builds the service-area polygon once. Call this after loading city_network.
-# buffer_m: small buffer in meters so points right at the network's edge
-# (e.g. an outlet near the boundary) aren't incorrectly rejected.
-build_service_area <- function(network, buffer_m = 300) {
+DEFAULT_MAX_SNAP_DISTANCE_M <- 3000  # generous -- adjust if needed, see below
+
+# Builds the convex-hull service-area polygon (secondary check / map overlay).
+build_service_area <- function(network, buffer_m = 1500) {
   nodes_sf <- network %>% activate("nodes") %>% st_as_sf()
   hull <- nodes_sf %>% st_union() %>% st_convex_hull()
   st_buffer(hull, buffer_m)
 }
 
-# Returns TRUE/FALSE for whether a point (same CRS as service_area) is
-# within the service area.
-is_within_service_area <- function(point, service_area) {
-  as.logical(st_within(point, service_area, sparse = FALSE)[1, 1])
+# point_4326: the raw click, EPSG:4326. Everything else can be in any CRS --
+# this function handles the transforms internally so callers don't need to
+# get CRS matching right themselves.
+is_within_service_area <- function(point_4326, network, service_area = NULL,
+                                    max_snap_distance_m = DEFAULT_MAX_SNAP_DISTANCE_M) {
+  point_net <- st_transform(point_4326, st_crs(network))
+  nodes_sf <- network %>% activate("nodes") %>% st_as_sf()
+
+  nearest_idx <- st_nearest_feature(point_net, nodes_sf)
+  dist_to_network <- as.numeric(st_distance(point_net, nodes_sf[nearest_idx, ]))
+
+  if (dist_to_network <= max_snap_distance_m) return(TRUE)
+
+  if (!is.null(service_area)) {
+    point_area_crs <- st_transform(point_4326, st_crs(service_area))
+    return(as.logical(st_within(point_area_crs, service_area, sparse = FALSE)[1, 1]))
+  }
+
+  FALSE
+}
+
+# ---- Diagnostic helper -------------------------------------------------
+# Run this directly in the R console if the geofence still looks wrong:
+#   source("R/07_geofence.R"); service_area_debug_info(readRDS("city_network.rds"))
+# If node count looks too small for a whole city, or the bounding box
+# doesn't cover where you're clicking, city_network.rds itself only covers
+# a small connected chunk of the city -- most likely from
+# to_largest_component() during the network build.
+service_area_debug_info <- function(network) {
+  nodes_sf <- network %>% activate("nodes") %>% st_as_sf()
+  bbox <- st_bbox(nodes_sf)
+  cat("Network node count:", nrow(nodes_sf), "\n")
+  cat("Network CRS:", st_crs(nodes_sf)$input, "\n")
+  cat("Network bounding box:\n")
+  print(bbox)
 }
