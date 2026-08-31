@@ -1,19 +1,22 @@
 # app_v2.R
 #
-# DynaRoute v2 dashboard -- demonstrates the actual DYNAMIC graph concept:
-# traffic + weather scale edge weights on every query, a service-area
-# geofence rejects invalid locations, the hostel curfew blocks nearby edges
-# (not just refuses a booking), the winning route is drawn along the real
-# network, and (if the streaming layer is running) live Kafka orders raise
-# an outlet's effective queue length in real time.
+# DynaRoute v2 dashboard. Demonstrates: customer click -> geofence -> current
+# conditions -> dynamic graph weights -> route calculation -> queue
+# prediction -> live queue -> best outlet -> expected delivery time.
 #
-# This file is intentionally separate from app.R / app_live.R -- neither of
-# those files is touched. Existing .rds files are loaded as-is; nothing is
-# regenerated, and the OSM network is NEVER re-downloaded here.
+# Only loads existing .rds files -- never downloads OSM data or regenerates
+# anything. app.R and app_live.R are untouched and unaffected by this file.
 #
-# The streaming layer (Kafka/Redpanda + Postgres) is optional. If it isn't
-# running, the dashboard automatically falls back to demand-model-only
-# predictions and says so clearly in the "Live Stream" panel.
+# Reactive design (see R/07 and R/08 for the underlying logic):
+#   customer_point <- reactiveVal(NULL)   -- set once, on click, nothing else
+#   result <- reactive({ ... })           -- depends on customer_point(),
+#                                             input$hour, and live_state(), so
+#                                             it recomputes automatically when
+#                                             ANY of those change, including
+#                                             just moving the hour slider with
+#                                             no new click.
+# No separate click_lng()/click_lat() reactives are used, avoiding the
+# stale-reactive bug from the earlier version.
 
 library(shiny)
 library(leaflet)
@@ -27,8 +30,7 @@ source("R/06_conditions.R")
 source("R/07_geofence.R")
 source("R/08_dynamic_scoring_v2.R")
 
-# DBI/RPostgres are only needed for the optional live layer. If they aren't
-# installed at all, the app still runs fine in fallback/demo mode.
+# DBI/RPostgres are only needed for the optional live layer.
 live_pkgs_available <- tryCatch({
   source("R/09_live_queue.R")
   TRUE
@@ -39,6 +41,7 @@ city_network <- readRDS("city_network.rds")
 outlets      <- readRDS("outlets.rds")
 hostel_node  <- readRDS("hostel_node.rds")
 demand_model <- readRDS("demand_model.rds")
+order_coords <- tryCatch(readRDS("order_coords_clustered.rds"), error = function(e) NULL)
 
 outlets_ll      <- st_transform(outlets, 4326)
 service_area    <- build_service_area(city_network)
@@ -50,17 +53,17 @@ ui <- fluidPage(
     sidebarPanel(
       sliderInput("hour", "Current Time (hour)", min = 0, max = 23, value = 19, step = 1,
                   animate = animationOptions(interval = 1500)),
+      checkboxInput("show_heatmap", "Show demand heatmap", value = FALSE),
       hr(),
       h4("Current Conditions"),
       textOutput("traffic_text"),
       textOutput("weather_text"),
       hr(),
       h4("Customer"),
-      textOutput("service_area_text"),
+      verbatimTextOutput("customer_text"),
       hr(),
       h4("Best Outlet"),
-      textOutput("best_outlet_text"),
-      textOutput("expected_time_text"),
+      verbatimTextOutput("best_outlet_text"),
       hr(),
       h4("Outlet Comparison"),
       tableOutput("comparison_table"),
@@ -71,19 +74,21 @@ ui <- fluidPage(
       h4("Live Stream"),
       textOutput("live_stream_text"),
       hr(),
+      h4("Routing Debug"),
+      verbatimTextOutput("debug_panel"),
+      hr(),
       helpText("Click anywhere on the map to place a customer.")
     ),
     mainPanel(
-      leafletOutput("map", height = 650)
+      leafletOutput("map", height = 700)
     )
   )
 )
 
 server <- function(input, output, session) {
 
-  result <- reactiveVal(NULL)
+  customer_point <- reactiveVal(NULL)
 
-  # Live stream state, refreshed every few seconds. Safe if streaming isn't running.
   live_state <- reactivePoll(
     4000, session,
     checkFunc = function() Sys.time(),
@@ -99,8 +104,8 @@ server <- function(input, output, session) {
   output$map <- renderLeaflet({
     leaflet() %>%
       addTiles() %>%
-      addPolygons(data = service_area_ll, color = "#1C7293", weight = 1,
-                  fillOpacity = 0.05, group = "service_area") %>%
+      addPolygons(data = service_area_ll, color = "#1C7293", weight = 2,
+                  fillOpacity = 0.08, group = "service_area") %>%
       addCircleMarkers(data = outlets_ll, label = ~outlet_id,
                         color = "#065A82", radius = 8, fillOpacity = 0.9)
   })
@@ -108,27 +113,47 @@ server <- function(input, output, session) {
   observeEvent(input$map_click, {
     click <- input$map_click
     pt_ll <- st_sfc(st_point(c(click$lng, click$lat)), crs = 4326)
+    customer_point(pt_ll)
 
     leafletProxy("map") %>%
       clearGroup("customer") %>%
-      clearGroup("route") %>%
       addCircleMarkers(lng = click$lng, lat = click$lat,
                         group = "customer", color = "black", radius = 6)
+  })
 
+  # Recomputes whenever customer_point(), input$hour, or live_state() change
+  # -- this is what makes moving the hour slider alone update the result
+  # without needing a fresh click.
+  result <- reactive({
+    req(customer_point())
     live <- live_state()
-    res <- assign_best_outlet_dynamic(
-      pt_ll, hour = input$hour,
+    assign_best_outlet_dynamic(
+      customer_point(), hour = input$hour,
       network = city_network, outlets_df = outlets, model = demand_model,
       hostel_pt = hostel_node$geometry, curfew_hour = hostel_node$curfew_hour,
       service_area = service_area_ll,
       live_queue_lookup = live$lookup
     )
-    result(res)
+  })
 
+  observe({
+    res <- result()
+    leafletProxy("map") %>% clearGroup("route")
     if (identical(res$status, "ok") && !is.null(res$route_line_projected)) {
       route_ll <- st_transform(res$route_line_projected, 4326)
       leafletProxy("map") %>%
         addPolylines(data = route_ll, color = "#3FA796", weight = 4, group = "route")
+    }
+  })
+
+  observe({
+    if (isTRUE(input$show_heatmap) && !is.null(order_coords)) {
+      leafletProxy("map") %>%
+        clearGroup("heatmap") %>%
+        addHeatmap(data = order_coords, lng = ~lon, lat = ~lat,
+                   radius = 35, blur = 40, group = "heatmap")
+    } else {
+      leafletProxy("map") %>% clearGroup("heatmap")
     }
   })
 
@@ -142,36 +167,41 @@ server <- function(input, output, session) {
     sprintf("Weather: %s (factor %.2f, %s)", w$condition, w$factor, w$source)
   })
 
-  output$service_area_text <- renderText({
+  output$customer_text <- renderPrint({
+    if (is.null(customer_point())) {
+      cat("No customer selected yet.")
+      return(invisible())
+    }
+    coords <- st_coordinates(customer_point())
+    cat(sprintf("lon = %.5f, lat = %.5f\n", coords[1], coords[2]))
+
     res <- result()
-    if (is.null(res)) return("No customer placed yet.")
-    if (identical(res$status, "outside_service_area")) {
-      return("Delivery unavailable: customer is outside the service area.")
-    }
-    if (identical(res$status, "hostel_curfew")) {
-      return("Delivery unavailable — hostel curfew is active.")
-    }
-    if (identical(res$status, "no_outlet_reachable")) {
-      return("No outlet can currently reach this location.")
-    }
-    "Valid service area."
+    status_msg <- switch(res$status,
+      "outside_service_area" = "Delivery unavailable: customer is outside the service area.",
+      "hostel_curfew"        = "Delivery unavailable: hostel curfew is active.",
+      "no_outlet_reachable"  = "No outlet can currently reach this location.",
+      "ok"                   = "Valid service area."
+    )
+    cat(status_msg)
   })
 
-  output$best_outlet_text <- renderText({
+  output$best_outlet_text <- renderPrint({
     res <- result()
-    if (is.null(res) || !identical(res$status, "ok")) return("—")
-    paste("Best Outlet:", res$chosen_outlet)
-  })
-
-  output$expected_time_text <- renderText({
-    res <- result()
-    if (is.null(res) || !identical(res$status, "ok")) return("")
-    sprintf("Expected Delivery Time: %.1f minutes", res$expected_time_min)
+    if (!identical(res$status, "ok")) {
+      cat("—")
+      return(invisible())
+    }
+    cat(sprintf("Best Outlet: %s\n", res$chosen_outlet))
+    cat(sprintf("Expected Time: %.1f min\n\n", res$expected_time_min))
+    cat(sprintf("Travel: %.1f min\n", res$travel_time_min))
+    cat(sprintf("Queue: %.1f orders (model) + %.1f (live)\n", res$predicted_queue, res$live_queue_boost))
+    cat(sprintf("Prep contribution: %.1f min\n", res$prep_contribution_min))
+    cat(sprintf("Traffic factor: %.2f\n", res$traffic$factor))
+    cat(sprintf("Weather factor: %.2f\n", res$weather$factor))
   })
 
   output$comparison_table <- renderTable({
     res <- result()
-    req(res)
     req(identical(res$status, "ok"))
     res$all_scores
   })
@@ -192,12 +222,47 @@ server <- function(input, output, session) {
   output$live_stream_text <- renderText({
     live <- live_state()
     if (!isTRUE(live$available)) {
-      return("Streaming layer not running — using demand-model predictions only (fallback/demo mode).")
+      return("Streaming layer offline — using demand model.")
     }
     sprintf(
-      "Orders processed: %d | New in last %d min: %d",
-      live$summary$orders_processed, LIVE_QUEUE_LOOKBACK_MIN, live$summary$recent_orders
+      "Orders processed: %d | New recently: %d",
+      live$summary$orders_processed, live$summary$recent_orders
     )
+  })
+
+  output$debug_panel <- renderPrint({
+    if (is.null(customer_point())) {
+      cat("No customer selected yet.")
+      return(invisible())
+    }
+
+    pt <- customer_point()
+    coords <- st_coordinates(pt)
+    cat(sprintf("Customer coordinates: lon=%.5f, lat=%.5f\n", coords[1], coords[2]))
+
+    pt_net <- st_transform(pt, st_crs(city_network))
+    nodes_sf <- city_network %>% activate("nodes") %>% st_as_sf()
+    nearest_idx <- st_nearest_feature(pt_net, nodes_sf)
+    nearest_coords <- st_coordinates(nodes_sf[nearest_idx, ])
+    dist_m <- as.numeric(st_distance(pt_net, nodes_sf[nearest_idx, ]))
+    cat(sprintf("Nearest network node: #%d, %.0f m away\n", nearest_idx, dist_m))
+
+    res <- result()
+    inside <- !identical(res$status, "outside_service_area")
+    cat(sprintf("Customer inside service area: %s\n", if (inside) "YES" else "NO"))
+
+    if (identical(res$status, "ok")) {
+      cat(sprintf("Selected outlet: %s\n", res$chosen_outlet))
+      cat(sprintf("Route found: YES (%d edges)\n", res$route_edge_count))
+    } else {
+      cat(sprintf("Status: %s\n", res$status))
+    }
+
+    t <- get_traffic_state(input$hour)
+    w <- get_weather_state()
+    cat(sprintf("Current hour: %d\n", input$hour))
+    cat(sprintf("Traffic factor: %.2f\n", t$factor))
+    cat(sprintf("Weather factor: %.2f\n", w$factor))
   })
 }
 
