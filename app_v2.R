@@ -87,182 +87,516 @@ ui <- fluidPage(
 
 server <- function(input, output, session) {
 
-  customer_point <- reactiveVal(NULL)
-
-  live_state <- reactivePoll(
-    4000, session,
-    checkFunc = function() Sys.time(),
-    valueFunc = function() {
-      if (live_pkgs_available && is_streaming_available()) {
-        list(available = TRUE, lookup = make_live_queue_lookup(), summary = get_live_stream_summary())
-      } else {
-        list(available = FALSE, lookup = NULL, summary = list(orders_processed = 0, recent_orders = 0))
-      }
-    }
-  )
+  live_state <- reactive({
+    list(
+      available = FALSE,
+      lookup = NULL,
+      summary = list(
+        orders_processed = 0,
+        recent_orders = 0
+      )
+    )
+  })
 
   output$map <- renderLeaflet({
     leaflet() %>%
       addTiles() %>%
-      addPolygons(data = service_area_ll, color = "#1C7293", weight = 2,
-                  fillOpacity = 0.08, group = "service_area") %>%
-      addCircleMarkers(data = outlets_ll, label = ~outlet_id,
-                        color = "#065A82", radius = 8, fillOpacity = 0.9)
+      addPolygons(
+        data = service_area_ll,
+        color = "#1C7293",
+        weight = 2,
+        fillOpacity = 0.08,
+        group = "service_area"
+      ) %>%
+      addCircleMarkers(
+        data = outlets_ll,
+        label = ~outlet_id,
+        color = "#065A82",
+        radius = 8,
+        fillOpacity = 0.9
+      )
   })
 
-  observeEvent(input$map_click, {
+  shiny::observeEvent(input$map_click, {
+
     click <- input$map_click
-    pt_ll <- st_sfc(st_point(c(click$lng, click$lat)), crs = 4326)
-    customer_point(pt_ll)
 
     leafletProxy("map") %>%
       clearGroup("customer") %>%
-      addCircleMarkers(lng = click$lng, lat = click$lat,
-                        group = "customer", color = "black", radius = 6)
+      clearGroup("route") %>%
+      addCircleMarkers(
+        lng = click$lng,
+        lat = click$lat,
+        group = "customer",
+        color = "black",
+        radius = 6
+      )
   })
 
-  # Recomputes whenever customer_point(), input$hour, or live_state() change
-  # -- this is what makes moving the hour slider alone update the result
-  # without needing a fresh click.
-  result <- reactive({
-    req(customer_point())
+  # ---------------------------------------------------------
+  # MAIN ROUTING REACTIVE
+  # Depends directly on map click + hour slider.
+  # No reactiveVal customer_point.
+  # No reactiveVal result.
+  # ---------------------------------------------------------
+
+  result <- shiny::reactive({
+
+    click <- input$map_click
+
+    req(click)
+
+    customer_point <- st_sfc(
+      st_point(
+        c(click$lng, click$lat)
+      ),
+      crs = 4326
+    )
+
     live <- live_state()
+
     assign_best_outlet_dynamic(
-      customer_point(), hour = input$hour,
-      network = city_network, outlets_df = outlets, model = demand_model,
-      hostel_pt = hostel_node$geometry, curfew_hour = hostel_node$curfew_hour,
+      customer_point,
+      hour = input$hour,
+      network = city_network,
+      outlets_df = outlets,
+      model = demand_model,
+      hostel_pt = hostel_node$geometry,
+      curfew_hour = hostel_node$curfew_hour,
       service_area = service_area_ll,
       live_queue_lookup = live$lookup
     )
   })
 
-  observe({
+  # ---------------------------------------------------------
+  # ROUTE
+  # ---------------------------------------------------------
+
+  shiny::observe({
+
+    req(input$map_click)
+
     res <- result()
-    leafletProxy("map") %>% clearGroup("route")
-    if (identical(res$status, "ok") && !is.null(res$route_line_projected)) {
-      route_ll <- st_transform(res$route_line_projected, 4326)
+
+    leafletProxy("map") %>%
+      clearGroup("route")
+
+    if (
+      identical(res$status, "ok") &&
+      !is.null(res$route_line_projected)
+    ) {
+
+      route_ll <- st_transform(
+        res$route_line_projected,
+        4326
+      )
+
       leafletProxy("map") %>%
-        addPolylines(data = route_ll, color = "#3FA796", weight = 4, group = "route")
+        addPolylines(
+          data = route_ll,
+          color = "#3FA796",
+          weight = 4,
+          group = "route"
+        )
     }
   })
 
-  observe({
-    if (isTRUE(input$show_heatmap) && !is.null(order_coords)) {
+  # ---------------------------------------------------------
+  # HEATMAP
+  # ---------------------------------------------------------
+
+  shiny::observe({
+
+    if (
+      isTRUE(input$show_heatmap) &&
+      !is.null(order_coords)
+    ) {
+
       leafletProxy("map") %>%
         clearGroup("heatmap") %>%
-        addHeatmap(data = order_coords, lng = ~lon, lat = ~lat,
-                   radius = 35, blur = 40, group = "heatmap")
+        addHeatmap(
+          data = order_coords,
+          lng = ~lon,
+          lat = ~lat,
+          radius = 35,
+          blur = 40,
+          group = "heatmap"
+        )
+
     } else {
-      leafletProxy("map") %>% clearGroup("heatmap")
+
+      leafletProxy("map") %>%
+        clearGroup("heatmap")
     }
   })
+
+  # ---------------------------------------------------------
+  # TRAFFIC
+  # ---------------------------------------------------------
 
   output$traffic_text <- renderText({
+
     t <- get_traffic_state(input$hour)
-    sprintf("Traffic: %s (factor %.2f)", t$level, t$factor)
+
+    sprintf(
+      "Traffic: %s (factor %.2f)",
+      t$level,
+      t$factor
+    )
   })
+
+  # ---------------------------------------------------------
+  # WEATHER
+  # ---------------------------------------------------------
 
   output$weather_text <- renderText({
+
     w <- get_weather_state()
-    sprintf("Weather: %s (factor %.2f, %s)", w$condition, w$factor, w$source)
+
+    sprintf(
+      "Weather: %s (factor %.2f, %s)",
+      w$condition,
+      w$factor,
+      w$source
+    )
   })
 
+  # ---------------------------------------------------------
+  # CUSTOMER
+  # ---------------------------------------------------------
+
   output$customer_text <- renderPrint({
-    if (is.null(customer_point())) {
+
+    click <- input$map_click
+
+    if (is.null(click)) {
+
       cat("No customer selected yet.")
+
       return(invisible())
     }
-    coords <- st_coordinates(customer_point())
-    cat(sprintf("lon = %.5f, lat = %.5f\n", coords[1], coords[2]))
+
+    cat(
+      sprintf(
+        "lon = %.5f, lat = %.5f\n",
+        click$lng,
+        click$lat
+      )
+    )
 
     res <- result()
-    status_msg <- switch(res$status,
-      "outside_service_area" = "Delivery unavailable: customer is outside the service area.",
-      "hostel_curfew"        = "Delivery unavailable: hostel curfew is active.",
-      "no_outlet_reachable"  = "No outlet can currently reach this location.",
-      "ok"                   = "Valid service area."
+
+    status_msg <- switch(
+      res$status,
+
+      "outside_service_area" =
+        "Delivery unavailable: customer is outside the service area.",
+
+      "hostel_curfew" =
+        "Delivery unavailable: hostel curfew is active.",
+
+      "no_outlet_reachable" =
+        "No outlet can currently reach this location.",
+
+      "ok" =
+        "Valid service area.",
+
+      "Unknown status."
     )
+
     cat(status_msg)
   })
 
+  # ---------------------------------------------------------
+  # BEST OUTLET
+  # ---------------------------------------------------------
+
   output$best_outlet_text <- renderPrint({
+
+    req(input$map_click)
+
     res <- result()
+
     if (!identical(res$status, "ok")) {
-      cat("—")
+
+      if (identical(res$status, "outside_service_area")) {
+        cat("Delivery unavailable: customer is outside the service area.")
+      }
+
+      else if (identical(res$status, "hostel_curfew")) {
+        cat("Delivery unavailable: hostel curfew is active.")
+      }
+
+      else if (identical(res$status, "no_outlet_reachable")) {
+        cat("No outlet can currently reach this location.")
+      }
+
+      else {
+        cat("Delivery unavailable.")
+      }
+
       return(invisible())
     }
-    cat(sprintf("Best Outlet: %s\n", res$chosen_outlet))
-    cat(sprintf("Expected Time: %.1f min\n\n", res$expected_time_min))
-    cat(sprintf("Travel: %.1f min\n", res$travel_time_min))
-    cat(sprintf("Queue: %.1f orders (model) + %.1f (live)\n", res$predicted_queue, res$live_queue_boost))
-    cat(sprintf("Prep contribution: %.1f min\n", res$prep_contribution_min))
-    cat(sprintf("Traffic factor: %.2f\n", res$traffic$factor))
-    cat(sprintf("Weather factor: %.2f\n", res$weather$factor))
+
+    cat(
+      sprintf(
+        "Best Outlet: %s\n",
+        res$chosen_outlet
+      )
+    )
+
+    cat(
+      sprintf(
+        "Expected Time: %.1f min\n\n",
+        res$expected_time_min
+      )
+    )
+
+    cat(
+      sprintf(
+        "Travel: %.1f min\n",
+        res$travel_time_min
+      )
+    )
+
+    cat(
+      sprintf(
+        "Queue: %.1f orders (model) + %.1f (live)\n",
+        res$predicted_queue,
+        res$live_queue_boost
+      )
+    )
+
+    cat(
+      sprintf(
+        "Prep contribution: %.1f min\n",
+        res$prep_contribution_min
+      )
+    )
+
+    cat(
+      sprintf(
+        "Traffic factor: %.2f\n",
+        res$traffic$factor
+      )
+    )
+
+    cat(
+      sprintf(
+        "Weather factor: %.2f\n",
+        res$weather$factor
+      )
+    ) 
   })
 
+  # ---------------------------------------------------------
+  # OUTLET COMPARISON
+  # ---------------------------------------------------------
+
   output$comparison_table <- renderTable({
+
+    req(input$map_click)
+
     res <- result()
-    req(identical(res$status, "ok"))
+
+    if (!identical(res$status, "ok")) {
+      return(NULL)
+    }
+
     res$all_scores
   })
 
+  # ---------------------------------------------------------
+  # NETWORK STATUS
+  # ---------------------------------------------------------
+
   output$network_status_table <- renderTable({
+
     t <- get_traffic_state(input$hour)
     w <- get_weather_state()
+
     tibble::tibble(
-      Metric = c("Traffic factor", "Weather factor", "Hostel curfew active"),
+
+      Metric = c(
+        "Traffic factor",
+        "Weather factor",
+        "Hostel curfew active"
+      ),
+
       Value = c(
-        sprintf("%.2f (%s)", t$factor, t$level),
-        sprintf("%.2f (%s)", w$factor, w$condition),
-        if (input$hour >= hostel_node$curfew_hour) "Yes" else "No"
+
+        sprintf(
+          "%.2f (%s)",
+          t$factor,
+          t$level
+        ),
+
+        sprintf(
+          "%.2f (%s)",
+          w$factor,
+          w$condition
+        ),
+
+        if (
+          input$hour >= hostel_node$curfew_hour
+        ) {
+          "Yes"
+        } else {
+          "No"
+        }
       )
     )
   })
 
+  # ---------------------------------------------------------
+  # LIVE STREAM
+  # ---------------------------------------------------------
+
   output$live_stream_text <- renderText({
+
     live <- live_state()
+
     if (!isTRUE(live$available)) {
-      return("Streaming layer offline — using demand model.")
+
+      return(
+        "Streaming layer offline — using demand model."
+      )
     }
+
     sprintf(
       "Orders processed: %d | New recently: %d",
-      live$summary$orders_processed, live$summary$recent_orders
+      live$summary$orders_processed,
+      live$summary$recent_orders
     )
   })
 
+  # ---------------------------------------------------------
+  # DEBUG PANEL
+  # ---------------------------------------------------------
+
   output$debug_panel <- renderPrint({
-    if (is.null(customer_point())) {
+
+    click <- input$map_click
+
+    if (is.null(click)) {
+
       cat("No customer selected yet.")
+
       return(invisible())
     }
 
-    pt <- customer_point()
-    coords <- st_coordinates(pt)
-    cat(sprintf("Customer coordinates: lon=%.5f, lat=%.5f\n", coords[1], coords[2]))
+    pt <- st_sfc(
+      st_point(
+        c(click$lng, click$lat)
+      ),
+      crs = 4326
+    )
 
-    pt_net <- st_transform(pt, st_crs(city_network))
-    nodes_sf <- city_network %>% activate("nodes") %>% st_as_sf()
-    nearest_idx <- st_nearest_feature(pt_net, nodes_sf)
-    nearest_coords <- st_coordinates(nodes_sf[nearest_idx, ])
-    dist_m <- as.numeric(st_distance(pt_net, nodes_sf[nearest_idx, ]))
-    cat(sprintf("Nearest network node: #%d, %.0f m away\n", nearest_idx, dist_m))
+    coords <- st_coordinates(pt)
+
+    cat(
+      sprintf(
+        "Customer coordinates: lon=%.5f, lat=%.5f\n",
+        coords[1],
+        coords[2]
+      )
+    )
+
+    pt_net <- st_transform(
+      pt,
+      st_crs(city_network)
+    )
+
+    nodes_sf <- city_network %>%
+      activate("nodes") %>%
+      st_as_sf()
+
+    nearest_idx <- st_nearest_feature(
+      pt_net,
+      nodes_sf
+    )
+
+    dist_m <- as.numeric(
+      st_distance(
+        pt_net,
+        nodes_sf[nearest_idx, ]
+      )
+    )
+
+    cat(
+      sprintf(
+        "Nearest network node: #%d, %.0f m away\n",
+        nearest_idx,
+        dist_m
+      )
+    )
 
     res <- result()
-    inside <- !identical(res$status, "outside_service_area")
-    cat(sprintf("Customer inside service area: %s\n", if (inside) "YES" else "NO"))
+
+    inside <- !identical(
+      res$status,
+      "outside_service_area"
+    )
+
+    cat(
+      sprintf(
+        "Customer inside service area: %s\n",
+        if (inside) "YES" else "NO"
+      )
+    )
 
     if (identical(res$status, "ok")) {
-      cat(sprintf("Selected outlet: %s\n", res$chosen_outlet))
-      cat(sprintf("Route found: YES (%d edges)\n", res$route_edge_count))
+
+      cat(
+        sprintf(
+          "Selected outlet: %s\n",
+          res$chosen_outlet
+        )
+      )
+
+      cat(
+        sprintf(
+          "Route found: YES (%d edges)\n",
+          res$route_edge_count
+        )
+      )
+
     } else {
-      cat(sprintf("Status: %s\n", res$status))
+
+      cat(
+        sprintf(
+          "Status: %s\n",
+          res$status
+        )
+      )
     }
 
-    t <- get_traffic_state(input$hour)
+    t <- get_traffic_state(
+      input$hour
+    )
+
     w <- get_weather_state()
-    cat(sprintf("Current hour: %d\n", input$hour))
-    cat(sprintf("Traffic factor: %.2f\n", t$factor))
-    cat(sprintf("Weather factor: %.2f\n", w$factor))
+
+    cat(
+      sprintf(
+        "Current hour: %d\n",
+        input$hour
+      )
+    )
+
+    cat(
+      sprintf(
+        "Traffic factor: %.2f\n",
+        t$factor
+      )
+    )
+
+    cat(
+      sprintf(
+        "Weather factor: %.2f\n",
+        w$factor
+      )
+    )
   })
 }
 
