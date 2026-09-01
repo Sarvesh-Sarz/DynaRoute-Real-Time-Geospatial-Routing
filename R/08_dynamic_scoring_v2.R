@@ -71,7 +71,12 @@ get_route_info <- function(network, from_point, to_point) {
 
   edges_sf <- network %>% activate("edges") %>% st_as_sf()
   travel_time <- sum(edges_sf$current_travel_time_min[edge_ids])
-  route_line <- edges_sf$geometry[edge_ids] %>% st_union() %>% st_line_merge()
+  route_geom <- edges_sf$geometry[edge_ids] %>% st_union()
+  route_line <- if (inherits(route_geom, "sfc_MULTILINESTRING")) {
+    st_line_merge(route_geom)
+  } else {
+    route_geom  # already a single LINESTRING -- nothing to merge
+  }
 
   list(travel_time = travel_time, edge_count = length(edge_ids), route_found = TRUE, route_line = route_line)
 }
