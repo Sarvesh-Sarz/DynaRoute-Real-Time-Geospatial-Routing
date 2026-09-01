@@ -20,8 +20,8 @@ set.seed(7)
 # ---- Config -----------------------------------------------------------
 grid_size <- 6            # 6x6 grid of intersections
 spacing_deg <- 0.004       # ~400m between adjacent intersections
-center_lon <- 79.1325      # roughly Vellore — change freely, it's fake data anyway
-center_lat <- 12.9165
+center_lon <- 80.2707     # Chennai — change freely, it's fake data anyway
+center_lat <- 13.0827
 walking_speed_kmph <- 20
 
 # ---- 1. Build grid nodes ---------------------------------------------------
