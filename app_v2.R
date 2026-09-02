@@ -45,6 +45,17 @@ demand_model <- readRDS("demand_model.rds")
 order_coords <- tryCatch(readRDS("order_coords_clustered.rds"), error = function(e) NULL)
 
 outlets_ll      <- st_transform(outlets, 4326)
+outlet_order_counts <- readRDS("simulated_orders.rds") %>%
+  dplyr::count(outlet_id, name = "order_count")
+
+outlets_ll <- outlets_ll %>%
+  dplyr::left_join(outlet_order_counts, by = "outlet_id") %>%
+  dplyr::mutate(order_count = tidyr::replace_na(order_count, 0))
+
+busyness_palette <- colorNumeric(
+  palette = c("#2ECC71", "#F1C40F", "#E74C3C"),
+  domain = outlets_ll$order_count
+)
 service_area    <- build_service_area(city_network)
 service_area_ll <- st_transform(service_area, 4326)
 
@@ -106,11 +117,16 @@ server <- function(input, output, session) {
             fillOpacity = 0.15, group = "service_area") %>%
       addCircleMarkers(
         data = outlets_ll,
-        label = ~outlet_id,
-        color = "#065A82",
-        radius = 8,
-        fillOpacity = 0.9
-      )
+        label = ~paste0(outlet_id, ": ", order_count, " orders"),
+        radius = ~scales::rescale(order_count, to = c(8, 22)),
+        color = ~busyness_palette(order_count),
+        fillOpacity = 0.85,
+        stroke = TRUE, weight = 1
+      ) %>%
+        addLegend(
+          position = "bottomright", pal = busyness_palette, values = outlets_ll$order_count,
+          title = "Orders (outlet load)"
+        )
   })
 
   shiny::observeEvent(input$map_click, {
@@ -211,11 +227,11 @@ server <- function(input, output, session) {
       leafletProxy("map") %>%
         clearGroup("heatmap") %>%
           addHeatmap(
-    data = order_coords, lng = ~lon, lat = ~lat,
-    radius = 25, blur = 20, max = 0.6,
-    gradient = c("0.2" = "blue", "0.4" = "cyan", "0.6" = "lime", "0.8" = "yellow", "1.0" = "red"),
-    group = "heatmap"
-  )
+  data = order_coords, lng = ~lon, lat = ~lat,
+  radius = 25, blur = 20, max = 0.6,
+  gradient = c("0.2" = "#0000FF", "0.4" = "#00FFFF", "0.6" = "#7FFF00", "0.8" = "#FFFF00", "1.0" = "#FF0000"),
+  group = "heatmap"
+)
 
     } else {
 
