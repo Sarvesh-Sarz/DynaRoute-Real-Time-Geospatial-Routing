@@ -21,8 +21,8 @@
 library(shiny)
 library(leaflet)
 library(sf)
-library(sfnetworks)
 library(leaflet.extras)
+library(sfnetworks)
 library(tidygraph)
 library(dplyr)
 
@@ -102,13 +102,8 @@ server <- function(input, output, session) {
   output$map <- renderLeaflet({
     leaflet() %>%
       addTiles() %>%
-      addPolygons(
-        data = service_area_ll,
-        color = "#1C7293",
-        weight = 2,
-        fillOpacity = 0.08,
-        group = "service_area"
-      ) %>%
+      addPolygons(data = service_area_ll, color = "#1C7293", weight = 3,
+            fillOpacity = 0.15, group = "service_area") %>%
       addCircleMarkers(
         data = outlets_ll,
         label = ~outlet_id,
