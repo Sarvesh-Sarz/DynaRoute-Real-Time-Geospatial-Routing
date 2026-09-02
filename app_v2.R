@@ -22,6 +22,7 @@ library(shiny)
 library(leaflet)
 library(sf)
 library(sfnetworks)
+library(leaflet.extras)
 library(tidygraph)
 library(dplyr)
 
