@@ -210,14 +210,12 @@ server <- function(input, output, session) {
 
       leafletProxy("map") %>%
         clearGroup("heatmap") %>%
-        addHeatmap(
-          data = order_coords,
-          lng = ~lon,
-          lat = ~lat,
-          radius = 35,
-          blur = 40,
-          group = "heatmap"
-        )
+          addHeatmap(
+    data = order_coords, lng = ~lon, lat = ~lat,
+    radius = 25, blur = 20, max = 0.6,
+    gradient = c("0.2" = "blue", "0.4" = "cyan", "0.6" = "lime", "0.8" = "yellow", "1.0" = "red"),
+    group = "heatmap"
+  )
 
     } else {
 
