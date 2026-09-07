@@ -107,20 +107,21 @@ docker compose up -d
 # 2. Install Python deps
 pip install -r requirements.txt
 
-# 3. In one terminal — start the producer (simulates live orders)
-python producer.py
+# 3. In one terminal — start the Poisson-process Kafka producer
+python producer_v2.py
 
 # 4. In another terminal — start the consumer (Kafka -> Postgres)
-python consumer.py
+python consumer_v2.py
 
-# 5. Back in R, from the project root — run the live dashboard
-Rscript -e "shiny::runApp('app_live.R')"
+# 5. Back in R, from the project root — run the dynamic dashboard
+Rscript -e "shiny::runApp('app_v2.R')"
 ```
 
-`producer.py` uses a **compressed clock** — 1 real minute = 1 simulated hour — so you'll see the
+`producer_v2.py` uses a **compressed clock** — 1 real minute = 1 simulated hour — so you'll see the
 hostel curfew kick in within a few minutes of starting it, instead of waiting a real 24 hours.
-`app_live.R` polls Postgres every 3 seconds (`reactivePoll()`) and scores outlets using the
-*actual* streamed queue lengths instead of the static tidymodels prediction used in `app.R`.
+It samples exponential inter-arrival gaps from the same piecewise Poisson process used in
+`R/02_simulate_orders.R`. `app_v2.R` polls Postgres every 3 seconds and adds the recent streamed
+orders to its model-predicted queue when scoring outlets.
 
 To stop everything: `Ctrl+C` the producer/consumer, then `docker compose down` in `streaming/`.
 

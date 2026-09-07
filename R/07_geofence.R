@@ -19,10 +19,11 @@ library(sf)
 library(sfnetworks)
 library(dplyr)
 
-DEFAULT_MAX_SNAP_DISTANCE_M <- 3000  # generous -- adjust if needed, see below
+DEFAULT_MAX_SNAP_DISTANCE_M <- 5000  # delivery reach beyond the nearest network node
+DEFAULT_SERVICE_AREA_BUFFER_M <- 5000 # delivery-radius buffer around the network hull
 
 # Builds the convex-hull service-area polygon (secondary check / map overlay).
-build_service_area <- function(network, buffer_m = 1500) {
+build_service_area <- function(network, buffer_m = DEFAULT_SERVICE_AREA_BUFFER_M) {
   nodes_sf <- network %>% activate("nodes") %>% st_as_sf()
   hull <- nodes_sf %>% st_union() %>% st_convex_hull()
   st_buffer(hull, buffer_m)

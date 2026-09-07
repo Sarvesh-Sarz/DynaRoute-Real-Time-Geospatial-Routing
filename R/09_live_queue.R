@@ -14,7 +14,11 @@ library(DBI)
 library(RPostgres)
 library(dplyr)
 
-LIVE_QUEUE_LOOKBACK_MIN <- 3   # only orders in the last N minutes count
+LIVE_QUEUE_LOOKBACK_MIN <- 10  # only orders in the last N minutes count
+# Widened from 3 -> 10: with 12 outlets splitting the Poisson arrival rate,
+# any single outlet only gets ~0.25-1.25 orders/minute on average, so a
+# 3-minute window frequently shows 0 for a given outlet just by chance, even
+# while the pipeline is working correctly. 10 minutes gives a fairer sample.
 
 connect_live_db <- function() {
   dbConnect(
@@ -46,7 +50,10 @@ get_live_queue_counts <- function() {
       GROUP BY outlet_id
     ", LIVE_QUEUE_LOOKBACK_MIN))
 
-    setNames(result$n, result$outlet_id)
+    # Postgres COUNT(*) is bigint -> RPostgres maps it to integer64 (bit64),
+    # not a plain double. Left un-converted, that integer64 poisons any
+    # downstream arithmetic/bind_rows() it touches once real counts flow in.
+    setNames(as.numeric(result$n), result$outlet_id)
   }, error = function(e) {
     setNames(numeric(0), character(0))  # empty -- no live influence
   })
@@ -71,7 +78,9 @@ get_live_stream_summary <- function() {
       SELECT COUNT(*) AS n FROM live_orders
       WHERE received_at > now() - interval '%d minutes'
     ", LIVE_QUEUE_LOOKBACK_MIN))$n
-    list(orders_processed = total, recent_orders = recent)
+    # Same integer64 -> numeric fix: these feed sprintf("%d", ...) in
+    # app_v2.R's live_stream_text, which errors on integer64 input.
+    list(orders_processed = as.numeric(total), recent_orders = as.numeric(recent))
   }, error = function(e) {
     list(orders_processed = 0, recent_orders = 0)
   })

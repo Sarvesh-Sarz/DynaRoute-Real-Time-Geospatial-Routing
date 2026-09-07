@@ -18,8 +18,8 @@ library(dplyr)
 set.seed(7)
 
 # ---- Config -----------------------------------------------------------
-grid_size <- 6            # 6x6 grid of intersections
-spacing_deg <- 0.004       # ~400m between adjacent intersections
+grid_size <- 10           # 10x10 grid of intersections (~6 km across)
+spacing_deg <- 0.006      # ~600m between adjacent intersections
 center_lon <- 80.2707     # Chennai — change freely, it's fake data anyway
 center_lat <- 13.0827
 walking_speed_kmph <- 20

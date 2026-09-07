@@ -44,20 +44,114 @@ hostel_node  <- readRDS("hostel_node.rds")
 demand_model <- readRDS("demand_model.rds")
 order_coords <- tryCatch(readRDS("order_coords_clustered.rds"), error = function(e) NULL)
 
-outlets_ll      <- st_transform(outlets, 4326)
-outlet_order_counts <- readRDS("simulated_orders.rds") %>%
-  dplyr::count(outlet_id, name = "order_count")
+outlets_ll       <- st_transform(outlets, 4326)
+simulated_orders <- readRDS("simulated_orders.rds")
 
-outlets_ll <- outlets_ll %>%
-  dplyr::left_join(outlet_order_counts, by = "outlet_id") %>%
-  dplyr::mutate(order_count = tidyr::replace_na(order_count, 0))
+MAX_HOURLY_ORDER_COUNT <- max(
+  simulated_orders %>% dplyr::count(outlet_id, hour) %>% dplyr::pull(n),
+  1
+)
 
-busyness_palette <- colorNumeric(
+# Live-order map markers (Kafka-fed), separate from the simulated/historical
+# scale above. Tuned for ~12 outlets splitting a 3-15 orders/sim-hour rate
+# over a lookback window (LIVE_QUEUE_LOOKBACK_MIN, from R/09_live_queue.R) --
+# adjust if those rates change materially.
+MAX_LIVE_ORDER_COUNT <- 15
+LIVE_OUTLET_MAP_REFRESH_MS <- 4000
+if (!exists("LIVE_QUEUE_LOOKBACK_MIN")) LIVE_QUEUE_LOOKBACK_MIN <- 10
+
+live_order_palette <- colorNumeric(
   palette = c("#2ECC71", "#F1C40F", "#E74C3C"),
-  domain = outlets_ll$order_count
+  domain = c(0, MAX_LIVE_ORDER_COUNT)
+)
+
+get_live_counts_safe <- function() {
+  if (live_pkgs_available && isTRUE(is_streaming_available())) {
+    get_live_queue_counts()
+  } else {
+    setNames(numeric(0), character(0))
+  }
+}
+
+hourly_order_palette <- colorNumeric(
+  palette = c("#2ECC71", "#F1C40F", "#E74C3C"),
+  domain = c(0, MAX_HOURLY_ORDER_COUNT)
+)
+TRAFFIC_MAP_COLORS <- c(
+  Low = "#2ECC71",
+  Moderate = "#F1C40F",
+  High = "#E67E22",
+  "Very High" = "#E74C3C"
 )
 service_area    <- build_service_area(city_network)
 service_area_ll <- st_transform(service_area, 4326)
+hostel_ll       <- st_transform(hostel_node, 4326)
+hostel_coords   <- st_coordinates(hostel_ll)[1, ]
+outlet_bbox     <- st_bbox(outlets_ll)
+
+# Real-time outlet load, straight from Kafka (via consumer_v2.py -> Postgres
+# live_orders). Counts orders received in the last LIVE_QUEUE_LOOKBACK_MIN
+# minutes (defined in R/09_live_queue.R), independent of the hour slider --
+# Kafka events carry a real timestamp, not a simulated-hour bucket, so this
+# reflects "right now," not whatever hour you've dragged the slider to.
+# If the streaming layer is offline, every outlet shows 0 (get_live_counts_safe()
+# returns an empty vector in that case) rather than falling back to the
+# historical simulated_orders.rds counts.
+outlet_loads_live <- function(live_counts) {
+  outlets_ll %>%
+    dplyr::mutate(
+      live_order_count = vapply(outlet_id, function(id) {
+        if (id %in% names(live_counts)) unname(live_counts[[id]]) else 0
+      }, numeric(1), USE.NAMES = FALSE),
+      marker_label = paste0(
+        outlet_id, ": ", live_order_count,
+        " live orders (last ", LIVE_QUEUE_LOOKBACK_MIN, " min)"
+      ),
+      marker_radius = scales::rescale(
+        live_order_count,
+        to = c(8, 22),
+        from = c(0, MAX_LIVE_ORDER_COUNT)
+      ),
+      marker_color = live_order_palette(pmin(live_order_count, MAX_LIVE_ORDER_COUNT))
+    )
+}
+
+# ---- TEMPORARY DEBUG INSTRUMENTATION -----------------------------------
+# Logs any error from outlet_loads_live() (or its inputs) to debug_log.txt
+# instead of letting it fail silently inside renderLeaflet/leafletProxy.
+# Falls back to plain grey markers so the map still renders even if this
+# specific step fails, which tells us whether outlet_loads_live() is the
+# actual culprit or not. Safe to remove once the real bug is found.
+log_debug <- function(label, err) {
+  msg <- sprintf("[%s] %s: %s", format(Sys.time()), label, paste(conditionMessage(err), collapse = "; "))
+  cat(msg, "\n", file = "debug_log.txt", append = TRUE)
+  cat(paste(deparse(sys.calls()), collapse = "\n"), "\n---\n", file = "debug_log.txt", append = TRUE)
+  message(msg)
+}
+
+get_live_counts_safe_logged <- function() {
+  tryCatch(get_live_counts_safe(), error = function(e) {
+    log_debug("get_live_counts_safe", e)
+    setNames(numeric(0), character(0))
+  })
+}
+
+outlet_loads_live_safe <- function(live_counts) {
+  tryCatch(
+    outlet_loads_live(live_counts),
+    error = function(e) {
+      log_debug("outlet_loads_live", e)
+      outlets_ll %>%
+        dplyr::mutate(
+          live_order_count = 0,
+          marker_label = paste0(outlet_id, ": load unavailable (see debug_log.txt)"),
+          marker_radius = 10,
+          marker_color = "#999999"
+        )
+    }
+  )
+}
+# ---- END TEMPORARY DEBUG INSTRUMENTATION -------------------------------
 
 ui <- fluidPage(
   titlePanel("DynaRoute — Real-Time Geospatial Routing (dynamic graph demo)"),
@@ -99,34 +193,142 @@ ui <- fluidPage(
 
 server <- function(input, output, session) {
 
-  live_state <- reactive({
-    list(
+  live_state <- if (live_pkgs_available) {
+    reactivePoll(
+      intervalMillis = 3000,
+      session = session,
+      checkFunc = function() {
+        summary <- get_live_stream_summary()
+        paste(summary$orders_processed, summary$recent_orders)
+      },
+      valueFunc = function() {
+        available <- is_streaming_available()
+        summary <- get_live_stream_summary()
+        list(
+          available = available,
+          lookup = if (available) make_live_queue_lookup() else NULL,
+          summary = summary
+        )
+      }
+    )
+  } else {
+    reactive(list(
       available = FALSE,
       lookup = NULL,
-      summary = list(
-        orders_processed = 0,
-        recent_orders = 0
-      )
-    )
-  })
+      summary = list(orders_processed = 0, recent_orders = 0)
+    ))
+  }
 
   output$map <- renderLeaflet({
+    initial_outlet_loads <- outlet_loads_live_safe(get_live_counts_safe_logged())
+    initial_traffic <- get_traffic_state(19, add_jitter = FALSE)
+    initial_traffic_color <- unname(TRAFFIC_MAP_COLORS[initial_traffic$level])
+
     leaflet() %>%
       addTiles() %>%
+      fitBounds(
+        lng1 = outlet_bbox[["xmin"]], lat1 = outlet_bbox[["ymin"]],
+        lng2 = outlet_bbox[["xmax"]], lat2 = outlet_bbox[["ymax"]]
+      ) %>%
       addPolygons(data = service_area_ll, color = "#1C7293", weight = 3,
             fillOpacity = 0.15, group = "service_area") %>%
       addCircleMarkers(
-        data = outlets_ll,
-        label = ~paste0(outlet_id, ": ", order_count, " orders"),
-        radius = ~scales::rescale(order_count, to = c(8, 22)),
-        color = ~busyness_palette(order_count),
+        data = initial_outlet_loads,
+        label = ~marker_label,
+        radius = ~marker_radius,
+        color = ~marker_color,
+        fillColor = ~marker_color,
         fillOpacity = 0.85,
-        stroke = TRUE, weight = 1
+        stroke = TRUE, weight = 1,
+        group = "outlets"
       ) %>%
         addLegend(
-          position = "bottomright", pal = busyness_palette, values = outlets_ll$order_count,
-          title = "Orders (outlet load)"
+          position = "bottomright", pal = live_order_palette,
+          values = c(0, MAX_LIVE_ORDER_COUNT),
+          title = paste0("Live orders (last ", LIVE_QUEUE_LOOKBACK_MIN, " min)"),
+          layerId = "live_orders_legend_ctrl"
+        ) %>%
+        addLegend(
+          position = "topright",
+          colors = initial_traffic_color,
+          labels = paste("Traffic:", initial_traffic$level),
+          title = "Current traffic",
+          opacity = 0.8,
+          layerId = "traffic_legend_ctrl"
         )
+  })
+
+  # Traffic legend/color updates with the hour slider. Outlet markers no
+  # longer depend on input$hour at all -- see the live-refresh timer below,
+  # since Kafka orders carry a real timestamp, not a simulated-hour bucket.
+  shiny::observeEvent(input$hour, {
+    traffic <- get_traffic_state(input$hour, add_jitter = FALSE)
+    traffic_color <- unname(TRAFFIC_MAP_COLORS[traffic$level])
+
+    leafletProxy("map") %>%
+      removeControl("traffic_legend_ctrl") %>%
+      addLegend(
+        position = "topright",
+        colors = traffic_color,
+        labels = paste("Traffic:", traffic$level),
+        title = "Current traffic",
+        opacity = 0.8,
+        layerId = "traffic_legend_ctrl"
+      )
+  }, ignoreInit = TRUE)
+
+  # Outlet markers refresh on a timer, independent of the hour slider, so
+  # they visibly update as new Kafka orders land in the background -- this
+  # is what makes outlet load genuinely "real-time" rather than replaying a
+  # static simulated day.
+  shiny::observe({
+    invalidateLater(LIVE_OUTLET_MAP_REFRESH_MS, session)
+    isolate({
+      counts <- get_live_counts_safe_logged()
+      outlet_loads <- outlet_loads_live_safe(counts)
+
+      leafletProxy("map") %>%
+        clearGroup("outlets") %>%
+        addCircleMarkers(
+          data = outlet_loads,
+          label = ~marker_label,
+          radius = ~marker_radius,
+          color = ~marker_color,
+          fillColor = ~marker_color,
+          fillOpacity = 0.85,
+          stroke = TRUE, weight = 1,
+          group = "outlets"
+        ) %>%
+        removeControl("live_orders_legend_ctrl") %>%
+        addLegend(
+          position = "bottomright", pal = live_order_palette,
+          values = c(0, MAX_LIVE_ORDER_COUNT),
+          title = paste0("Live orders (last ", LIVE_QUEUE_LOOKBACK_MIN, " min)"),
+          layerId = "live_orders_legend_ctrl"
+        )
+    })
+  })
+
+  # Show the same hostel radius used by the dynamic scoring engine once the
+  # curfew begins. It is independent of the customer-click route overlay.
+  shiny::observe({
+    curfew_active <- input$hour >= hostel_node$curfew_hour[1]
+    map <- leafletProxy("map") %>% clearGroup("curfew_zone")
+
+    if (curfew_active) {
+      map %>%
+        addCircles(
+          lng = hostel_coords[["X"]],
+          lat = hostel_coords[["Y"]],
+          radius = HOSTEL_BLOCK_RADIUS_M,
+          color = "#E74C3C",
+          fillColor = "#E74C3C",
+          fillOpacity = 0.15,
+          weight = 2,
+          label = "Hostel curfew zone: delivery blocked",
+          group = "curfew_zone"
+        )
+    }
   })
 
   shiny::observeEvent(input$map_click, {
@@ -136,6 +338,7 @@ server <- function(input, output, session) {
     leafletProxy("map") %>%
       clearGroup("customer") %>%
       clearGroup("route") %>%
+      clearGroup("best_outlet") %>%
       addCircleMarkers(
         lng = click$lng,
         lat = click$lat,
@@ -191,7 +394,8 @@ server <- function(input, output, session) {
     res <- result()
 
     leafletProxy("map") %>%
-      clearGroup("route")
+      clearGroup("route") %>%
+      clearGroup("best_outlet")
 
     if (
       identical(res$status, "ok") &&
@@ -203,12 +407,33 @@ server <- function(input, output, session) {
         4326
       )
 
+      best_outlet_ll <- outlets_ll %>%
+        dplyr::filter(outlet_id == res$chosen_outlet)
+      best_outlet_label <- paste0("Best outlet: ", res$chosen_outlet)
+
       leafletProxy("map") %>%
         addPolylines(
           data = route_ll,
-          color = "#3FA796",
-          weight = 4,
+          color = "#1C7293",
+          weight = 5,
+          label = best_outlet_label,
           group = "route"
+        ) %>%
+        addAwesomeMarkers(
+          data = best_outlet_ll,
+          icon = makeAwesomeIcon(
+            icon = "location-arrow",
+            library = "fa",
+            markerColor = "blue",
+            iconColor = "white"
+          ),
+          label = best_outlet_label,
+          labelOptions = labelOptions(
+            noHide = TRUE,
+            direction = "top",
+            textOnly = TRUE
+          ),
+          group = "best_outlet"
         )
     }
   })
