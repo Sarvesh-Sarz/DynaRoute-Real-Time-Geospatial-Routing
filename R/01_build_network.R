@@ -11,7 +11,7 @@ library(sfnetworks)
 library(dplyr)
 
 # ---- Config -----------------------------------------------------------
-place_name <- "Vellore, Tamil Nadu, India"   # change this to your target city
+place_name <- "Chennai, Tamil Nadu, India"   # change this to your target city
 walking_speed_kmph <- 20                     # rough scooter/bike delivery speed
 
 # ---- 1. Download the road network -------------------------------------

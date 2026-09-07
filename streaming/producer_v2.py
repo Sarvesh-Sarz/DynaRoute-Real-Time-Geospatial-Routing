@@ -19,6 +19,7 @@ Usage:
 """
 
 import json
+import os
 import random
 import time
 import uuid
@@ -29,9 +30,12 @@ from kafka import KafkaProducer
 TOPIC = "orders_v2"
 BOOTSTRAP_SERVERS = ["localhost:9092"]
 
-OUTLETS = ["O1", "O2", "O3", "O4", "O5", "O6"]
+OUTLET_COUNT = int(os.environ.get("DYNAROUTE_OUTLET_COUNT", "12"))
+OUTLETS = [f"O{i}" for i in range(1, OUTLET_COUNT + 1)]
 HOSTEL_CURFEW_HOUR = 20
 MINUTES_PER_SIM_HOUR = 1.0
+BASELINE_RATE = 3  # orders per simulated hour
+HOSTEL_RATE = 12   # additional orders per simulated hour during the spike
 
 TRAFFIC_LEVELS = {
     range(0, 7): "Low", range(7, 11): "High", range(11, 17): "Moderate",
@@ -40,12 +44,10 @@ TRAFFIC_LEVELS = {
 WEATHER_CONDITIONS = ["Clear", "Cloudy", "Light Rain", "Heavy Rain"]
 WEATHER_WEIGHTS = [0.55, 0.25, 0.15, 0.05]
 
-# A couple of outlets are naturally busier than others, and one is favored
-# during the hostel's evening spike -- mirrors the pattern used in
-# R/02_simulate_orders.R so the live stream is consistent with the trained
-# demand model instead of contradicting it.
-BASE_OUTLET_WEIGHTS = [2, 3, 1, 2, 1, 1]
-HOSTEL_OUTLET_WEIGHTS = [1, 4, 1, 1, 1, 1]
+# A couple of outlets are naturally busier; O2 is favoured during the hostel
+# spike. The vectors scale with the configured outlet count.
+BASE_OUTLET_WEIGHTS = [1 + (i % 3) * 0.25 for i in range(OUTLET_COUNT)]
+HOSTEL_OUTLET_WEIGHTS = [4 if i == 1 else 1 for i in range(OUTLET_COUNT)]
 
 producer = KafkaProducer(
     bootstrap_servers=BOOTSTRAP_SERVERS,
@@ -61,20 +63,8 @@ def traffic_level_for_hour(hour):
 
 
 def demand_lambda_for_hour(hour):
-    # morning low, lunch higher, evening high, late night low
-    if 0 <= hour < 6:
-        return 1
-    if 6 <= hour < 10:
-        return 3
-    if 10 <= hour < 14:
-        return 6        # lunch
-    if 14 <= hour < 17:
-        return 3
-    if 17 <= hour < HOSTEL_CURFEW_HOUR:
-        return 9        # evening + hostel spike window
-    if HOSTEL_CURFEW_HOUR <= hour < 23:
-        return 4
-    return 1
+    """Piecewise rate shared with R/02_simulate_orders.R."""
+    return BASELINE_RATE + (HOSTEL_RATE if 18 <= hour < HOSTEL_CURFEW_HOUR else 0)
 
 
 def make_event(hour, is_historical, sim_timestamp):
@@ -101,12 +91,16 @@ def make_event(hour, is_historical, sim_timestamp):
 
 
 def run_historical_burst():
-    print("Producer: sending historical burst (one full synthetic day)...")
+    """Publish one exact Poisson-realised day to seed the live dashboard."""
+    print("Producer: sending historical Poisson burst (one synthetic day)...")
     now = datetime.utcnow()
     for hour in range(24):
-        n_events = max(1, int(demand_lambda_for_hour(hour) * random.uniform(0.7, 1.3)))
-        sim_timestamp = now - timedelta(hours=(24 - hour))
-        for _ in range(n_events):
+        arrival_time = 0.0
+        while True:
+            arrival_time += random.expovariate(demand_lambda_for_hour(hour))
+            if arrival_time >= 1:
+                break
+            sim_timestamp = now - timedelta(hours=(24 - hour - arrival_time))
             event = make_event(hour, is_historical=True, sim_timestamp=sim_timestamp)
             producer.send(TOPIC, value=event)
     producer.flush()
@@ -114,16 +108,29 @@ def run_historical_burst():
 
 
 def run_live_stream():
-    print(f"Producer: live stream started. 1 real minute = {MINUTES_PER_SIM_HOUR} sim hour(s).")
+    print("Producer: live Poisson stream started. "
+          f"1 real minute = {MINUTES_PER_SIM_HOUR} sim hour(s).")
     print(f"Hostel curfew hits at simulated hour {HOSTEL_CURFEW_HOUR}:00.")
     start_time = time.time()
     while True:
         elapsed_min = (time.time() - start_time) / 60
-        hour = int((elapsed_min / MINUTES_PER_SIM_HOUR) % 24)
+        elapsed_sim_hours = elapsed_min / MINUTES_PER_SIM_HOUR
+        hour = int(elapsed_sim_hours % 24)
+        seconds_per_sim_hour = MINUTES_PER_SIM_HOUR * 60
+        seconds_to_hour_end = max((1 - (elapsed_sim_hours % 1)) * seconds_per_sim_hour, 0.01)
+
+        # Exponential inter-arrival gaps are the defining property of a
+        # Poisson process. Resampling at an hour boundary keeps this exact
+        # when the piecewise rate changes (especially at the evening spike).
+        gap_seconds = random.expovariate(demand_lambda_for_hour(hour)) * seconds_per_sim_hour
+        if gap_seconds >= seconds_to_hour_end:
+            time.sleep(seconds_to_hour_end)
+            continue
+
+        time.sleep(gap_seconds)
         event = make_event(hour, is_historical=False, sim_timestamp=datetime.utcnow())
         producer.send(TOPIC, value=event)
         print(f"[sim {hour:02d}:00] {event}")
-        time.sleep(random.uniform(1, 3))
 
 
 if __name__ == "__main__":
