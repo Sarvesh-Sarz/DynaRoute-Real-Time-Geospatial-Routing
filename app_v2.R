@@ -154,42 +154,71 @@ outlet_loads_live_safe <- function(live_counts) {
 # ---- END TEMPORARY DEBUG INSTRUMENTATION -------------------------------
 
 ui <- fluidPage(
-  titlePanel("DynaRoute — Real-Time Geospatial Routing (dynamic graph demo)"),
-  sidebarLayout(
-    sidebarPanel(
-      sliderInput("hour", "Current Time (hour)", min = 0, max = 23, value = 19, step = 1,
-                  animate = animationOptions(interval = 1500)),
-      checkboxInput("show_heatmap", "Show demand heatmap", value = FALSE),
-      hr(),
-      h4("Current Conditions"),
-      textOutput("traffic_text"),
-      textOutput("weather_text"),
-      hr(),
-      h4("Customer"),
-      verbatimTextOutput("customer_text"),
-      hr(),
-      h4("Best Outlet"),
-      verbatimTextOutput("best_outlet_text"),
-      hr(),
-      h4("Outlet Comparison"),
-      tableOutput("comparison_table"),
-      hr(),
-      h4("Dynamic Network Status"),
-      tableOutput("network_status_table"),
-      hr(),
-      h4("Live Stream"),
-      textOutput("live_stream_text"),
-      hr(),
-      h4("Routing Debug"),
-      verbatimTextOutput("debug_panel"),
-      hr(),
-      helpText("Click anywhere on the map to place a customer.")
+  tags$head(
+    tags$link(rel = "stylesheet", href = "dynaroute_theme.css"),
+    tags$link(rel = "stylesheet", href = "https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css")
+  ),
+
+  tags$div(class = "dr-app",
+
+    tags$div(class = "dr-sidebar",
+      tags$div(class = "dr-logo", tags$i(class = "fa-solid fa-route"), "DynaRoute"),
+      tags$div(class = "dr-nav-item active", tags$i(class = "fa-solid fa-gauge"), "Dashboard"),
+      tags$div(class = "dr-nav-item", tags$i(class = "fa-solid fa-store"), "Outlets"),
+      tags$div(class = "dr-nav-item", tags$i(class = "fa-solid fa-chart-line"), "Analytics"),
+      tags$div(class = "dr-nav-item", tags$i(class = "fa-solid fa-gear"), "Settings")
     ),
-    mainPanel(
-      leafletOutput("map", height = 700)
+
+    tags$div(class = "dr-main",
+
+      tags$div(class = "dr-topbar", tags$h2("Dashboard")),
+
+      tags$div(class = "dr-pills",
+        tags$div(class = "dr-pill", "Live Orders: ", tags$b(textOutput("dr_pill_live", inline = TRUE))),
+        tags$div(class = "dr-pill", "Avg Savings: ", tags$span(class = "dr-pill-accent", textOutput("dr_pill_savings", inline = TRUE))),
+        tags$div(class = "dr-pill", "Active Outlets: ", tags$b(textOutput("dr_pill_outlets", inline = TRUE)))
+      ),
+
+      tags$div(class = "dr-grid",
+
+        tags$div(class = "dr-map-card",
+          leafletOutput("map", height = 640)
+        ),
+
+        tags$div(class = "dr-right-col",
+
+          tags$div(class = "dr-card",
+            tags$h4("TIME OF DAY"),
+            sliderInput("hour", NULL, min = 0, max = 23, value = 19, step = 1,
+                        animate = animationOptions(interval = 1500)),
+            checkboxInput("show_heatmap", "Show demand heatmap", value = FALSE),
+            tags$div(style = "font-size:12px; color:#6b7280; margin-top:6px;",
+              textOutput("traffic_text"), textOutput("weather_text")
+            )
+          ),
+
+          tags$div(class = "dr-card",
+            tags$h4("ORDER ASSIGNMENT"),
+            uiOutput("dr_order_assignment")
+          )
+        )
+      ),
+
+      tags$details(style = "margin-top: 18px;",
+        tags$summary(class = "dr-tech-toggle", "Technical details (routing debug)"),
+        tags$div(class = "dr-card", style = "margin-top: 10px;",
+          h4("Customer"), verbatimTextOutput("customer_text"),
+          h4("Best Outlet"), verbatimTextOutput("best_outlet_text"),
+          h4("Outlet Comparison"), tableOutput("comparison_table"),
+          h4("Dynamic Network Status"), tableOutput("network_status_table"),
+          h4("Live Stream"), textOutput("live_stream_text"),
+          h4("Routing Debug"), verbatimTextOutput("debug_panel")
+        )
+      )
     )
   )
 )
+
 
 server <- function(input, output, session) {
 
