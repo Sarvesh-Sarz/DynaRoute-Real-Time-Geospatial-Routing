@@ -448,14 +448,13 @@ server <- function(input, output, session) {
   })
 
   # ---------------------------------------------------------
-  # NEW UI: stat pills + Order Assignment card
-  # (paste this block anywhere inside server <- function(...) { ... },
-  # e.g. right after the "MAIN ROUTING REACTIVE" result <- reactive({...}) block)
+  # NEW UI (v2): stat strip + dashboard summary + analytics table
+  # Paste this block inside server <- function(...) { ... },
+  # right after the "MAIN ROUTING REACTIVE" result <- reactive({...}) block.
   # ---------------------------------------------------------
 
   # Tracks (nearest outlet's time - chosen outlet's time) across the
-  # session, for the "Avg Savings" pill. Only logs when a valid assignment
-  # actually happened, so it never counts curfew/geofence rejections.
+  # session, for the "Avg savings" stat. Only logs valid assignments.
   savings_log <- reactiveVal(numeric(0))
 
   observeEvent(result(), {
@@ -486,7 +485,8 @@ server <- function(input, output, session) {
     as.character(nrow(outlets))
   })
 
-  output$dr_order_assignment <- renderUI({
+  # ---- Dashboard page: compact summary, links to Analytics for detail ----
+  output$dr_order_summary <- renderUI({
     click <- input$map_click
     if (is.null(click)) {
       return(tags$div(class = "dr-empty", "Click the map to assign an order."))
@@ -504,46 +504,57 @@ server <- function(input, output, session) {
       return(tags$div(class = "dr-empty", msg))
     }
 
-    avail <- res$all_scores %>% dplyr::filter(status == "Available")
-    nearest <- avail %>% dplyr::slice_min(travel_time_min, n = 1, with_ties = FALSE)
-    recommended_row <- avail %>% dplyr::filter(outlet_id == res$chosen_outlet) %>% dplyr::slice(1)
+    tagList(
+      tags$div(class = "dr-summary-outlet", res$chosen_outlet),
+      tags$div(class = "dr-summary-meta",
+        sprintf("%.1f min expected · %.1f min travel", res$expected_time_min, res$travel_time_min)
+      ),
+      tags$a(class = "dr-link-btn", onclick = "drSetPage('analytics')",
+             "View full comparison →")
+    )
+  })
 
-    # Approximate km from travel time using the same speed assumption the
-    # network was built with (see 01_build_network.R / dev_synthetic_network.R)
-    # -- not a fabricated number, just the inverse of travel_time_min's own formula.
-    speed_kmph <- 20
-    rec_km  <- round(recommended_row$travel_time_min / 60 * speed_kmph, 1)
-    near_km <- round(nearest$travel_time_min / 60 * speed_kmph, 1)
-
-    same <- identical(nearest$outlet_id, res$chosen_outlet)
-
-    explain <- if (same) {
-      sprintf("%s is both the nearest and lowest-wait option.", res$chosen_outlet)
-    } else {
-      sprintf(
-        "System chose %s over the nearer %s — expected queue of %.1f orders vs %.1f, despite being %.1f km further.",
-        res$chosen_outlet, nearest$outlet_id,
-        recommended_row$predicted_queue + recommended_row$live_queue_boost,
-        nearest$predicted_queue + nearest$live_queue_boost,
-        max(rec_km - near_km, 0)
-      )
+  # ---- Analytics page: every outlet, for the currently selected location ----
+  output$dr_analytics_body <- renderUI({
+    click <- input$map_click
+    if (is.null(click)) {
+      return(tags$div(class = "dr-select-hint", "Select a location on the map to see the delivery comparison."))
     }
 
-    tagList(
-      tags$div(class = "dr-result-label", "Result: ", tags$b("Customer order")),
-      tags$div(class = "dr-compare",
-        tags$div(class = "dr-compare-box recommended",
-          tags$div(class = "dr-compare-tag", "RECOMMENDED"),
-          tags$div(class = "dr-compare-outlet", res$chosen_outlet),
-          tags$div(class = "dr-compare-meta", sprintf("%.1f km · %.1f min", rec_km, recommended_row$expected_time_min))
-        ),
-        tags$div(class = "dr-compare-box nearest",
-          tags$div(class = "dr-compare-tag", "NEAREST"),
-          tags$div(class = "dr-compare-outlet", nearest$outlet_id),
-          tags$div(class = "dr-compare-meta", sprintf("%.1f km · %.1f min", near_km, nearest$expected_time_min))
-        )
-      ),
-      tags$div(class = "dr-explain", explain)
+    res <- result()
+
+    if (!identical(res$status, "ok")) {
+      msg <- switch(res$status,
+        "outside_service_area" = "This location is outside the service area.",
+        "hostel_curfew"        = "Hostel curfew is active for this location.",
+        "no_outlet_reachable"  = "No outlet can currently reach this location.",
+        "Delivery unavailable."
+      )
+      return(tags$div(class = "dr-select-hint", msg))
+    }
+
+    rows <- res$all_scores %>% dplyr::arrange(expected_time_min)
+
+    tags$table(class = "dr-table",
+      tags$thead(tags$tr(
+        tags$th("Outlet"), tags$th("Travel"), tags$th("Queue"),
+        tags$th("Live boost"), tags$th("Expected"), tags$th("Status")
+      )),
+      tags$tbody(
+        lapply(seq_len(nrow(rows)), function(i) {
+          r <- rows[i, ]
+          is_best <- identical(r$outlet_id, res$chosen_outlet)
+          tags$tr(
+            class = if (is_best) "dr-row-best" else NULL,
+            tags$td(r$outlet_id),
+            tags$td(sprintf("%.1f min", r$travel_time_min)),
+            tags$td(sprintf("%.1f", r$predicted_queue)),
+            tags$td(sprintf("%.1f", r$live_queue_boost)),
+            tags$td(if (is.na(r$expected_time_min)) "—" else sprintf("%.1f min", r$expected_time_min)),
+            tags$td(r$status)
+          )
+        })
+      )
     )
   })
 
