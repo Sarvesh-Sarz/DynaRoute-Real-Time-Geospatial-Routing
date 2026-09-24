@@ -156,51 +156,85 @@ outlet_loads_live_safe <- function(live_counts) {
 ui <- fluidPage(
   tags$head(
     tags$link(rel = "stylesheet", href = "dynaroute_theme.css"),
-    tags$link(rel = "stylesheet", href = "https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css")
+    tags$script(HTML("
+      function drSetPage(page) {
+        Shiny.setInputValue('dr_page', page);
+        document.querySelectorAll('.dr-nav-item').forEach(function(el) {
+          el.classList.remove('active');
+        });
+        document.getElementById('dr-nav-' + page).classList.add('active');
+      }
+    "))
   ),
 
   tags$div(class = "dr-app",
 
     tags$div(class = "dr-sidebar",
-      tags$div(class = "dr-logo", tags$i(class = "fa-solid fa-route"), "DynaRoute"),
-      tags$div(class = "dr-nav-item active", tags$i(class = "fa-solid fa-gauge"), "Dashboard"),
-      tags$div(class = "dr-nav-item", tags$i(class = "fa-solid fa-store"), "Outlets"),
-      tags$div(class = "dr-nav-item", tags$i(class = "fa-solid fa-chart-line"), "Analytics"),
-      tags$div(class = "dr-nav-item", tags$i(class = "fa-solid fa-gear"), "Settings")
+      tags$div(class = "dr-logo", "Dyna", tags$span("Route")),
+      tags$a(id = "dr-nav-dashboard", class = "dr-nav-item active",
+             onclick = "drSetPage('dashboard')", "Dashboard"),
+      tags$a(id = "dr-nav-analytics", class = "dr-nav-item",
+             onclick = "drSetPage('analytics')", "Analytics")
     ),
 
     tags$div(class = "dr-main",
 
-      tags$div(class = "dr-topbar", tags$h2("Dashboard")),
-
-      tags$div(class = "dr-pills",
-        tags$div(class = "dr-pill", "Live Orders: ", tags$b(textOutput("dr_pill_live", inline = TRUE))),
-        tags$div(class = "dr-pill", "Avg Savings: ", tags$span(class = "dr-pill-accent", textOutput("dr_pill_savings", inline = TRUE))),
-        tags$div(class = "dr-pill", "Active Outlets: ", tags$b(textOutput("dr_pill_outlets", inline = TRUE)))
+      tags$div(class = "dr-stats",
+        tags$div(class = "dr-stat",
+          tags$div(class = "dr-stat-label", "Live orders"),
+          tags$div(class = "dr-stat-value dr-mono", textOutput("dr_pill_live", inline = TRUE))
+        ),
+        tags$div(class = "dr-stat",
+          tags$div(class = "dr-stat-label", "Avg savings"),
+          tags$div(class = "dr-stat-value dr-mono", textOutput("dr_pill_savings", inline = TRUE))
+        ),
+        tags$div(class = "dr-stat",
+          tags$div(class = "dr-stat-label", "Active outlets"),
+          tags$div(class = "dr-stat-value dr-mono", textOutput("dr_pill_outlets", inline = TRUE))
+        )
       ),
 
-      tags$div(class = "dr-grid",
+      # ---- Dashboard page ----
+      conditionalPanel(
+        condition = "typeof input.dr_page === 'undefined' || input.dr_page == 'dashboard'",
 
-        tags$div(class = "dr-map-card",
-          leafletOutput("map", height = 640)
-        ),
+        tags$div(class = "dr-topbar", tags$h2("Dashboard")),
 
-        tags$div(class = "dr-right-col",
+        tags$div(class = "dr-grid",
 
-          tags$div(class = "dr-card",
-            tags$h4("TIME OF DAY"),
-            sliderInput("hour", NULL, min = 0, max = 23, value = 19, step = 1,
-                        animate = animationOptions(interval = 1500)),
-            checkboxInput("show_heatmap", "Show demand heatmap", value = FALSE),
-            tags$div(style = "font-size:12px; color:#6b7280; margin-top:6px;",
-              textOutput("traffic_text"), textOutput("weather_text")
-            )
+          tags$div(class = "dr-map-card",
+            leafletOutput("map", height = 620)
           ),
 
-          tags$div(class = "dr-card",
-            tags$h4("ORDER ASSIGNMENT"),
-            uiOutput("dr_order_assignment")
+          tags$div(class = "dr-right-col",
+
+            tags$div(class = "dr-card",
+              tags$h4("Time of day"),
+              sliderInput("hour", NULL, min = 0, max = 23, value = 19, step = 1,
+                          animate = animationOptions(interval = 1500)),
+              checkboxInput("show_heatmap", "Show demand heatmap", value = FALSE),
+              tags$div(style = "font-size:12px; color:var(--muted); margin-top:6px;",
+                textOutput("traffic_text"), textOutput("weather_text")
+              )
+            ),
+
+            tags$div(class = "dr-card",
+              tags$h4("Order assignment"),
+              uiOutput("dr_order_summary")
+            )
           )
+        )
+      ),
+
+      # ---- Analytics page ----
+      conditionalPanel(
+        condition = "input.dr_page == 'analytics'",
+
+        tags$div(class = "dr-topbar", tags$h2("Analytics")),
+
+        tags$div(class = "dr-card",
+          tags$h4("Outlet comparison for the selected location"),
+          uiOutput("dr_analytics_body")
         )
       ),
 
@@ -218,6 +252,7 @@ ui <- fluidPage(
     )
   )
 )
+
 
 
 server <- function(input, output, session) {
