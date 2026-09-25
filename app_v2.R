@@ -155,7 +155,7 @@ outlet_loads_live_safe <- function(live_counts) {
 
 ui <- fluidPage(
   tags$head(
-    tags$link(rel = "stylesheet", href = "dynaroute_theme.css"),
+    tags$link(rel = "stylesheet", href = "dynaroute_theme.css?v=2"),
     tags$script(HTML("
       function drSetPage(page) {
         Shiny.setInputValue('dr_page', page);
