@@ -83,3 +83,30 @@ dynaroute/
 
 The core project is 100% R. The streaming layer's producer/consumer bridge is Python, since R has
 no solid native Kafka client — everything else, including all the routing/scoring logic, is R.
+
+## Setup
+
+```r
+# 1. Install dependencies (one-time)
+source("requirements.R")
+
+# 2. Build the road network for your chosen city
+source("R/01_build_network.R")     # real OSM data (needs internet)
+# or, for a fast offline test network:
+source("R/dev_synthetic_network.R")
+
+# 3. Regenerate everything downstream of the network you just built —
+#    outlets/hostel are sampled directly FROM the current network's nodes,
+#    so this step must always run again after rebuilding the network, or
+#    the two will silently go out of sync.
+source("R/02_simulate_orders.R")
+source("R/03_demand_model.R")
+source("R/05_demand_clusters.R")
+```
+
+Or run the non-streaming pipeline in one go with `Rscript run_pipeline.R` (real OSM data) or
+`Rscript run_pipeline.R --fast` (instant synthetic network). See `TESTING.md` for expected output
+at each stage.
+
+By default `01_build_network.R` pulls the road network around **Chennai, Tamil Nadu** — change
+`place_name` at the top of that file for any other city OpenStreetMap recognizes.
